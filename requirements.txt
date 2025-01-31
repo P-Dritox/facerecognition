@@ -1,0 +1,6 @@
+Flask
+requests
+opencv-python
+numpy
+deepface
+Flask-Cors
