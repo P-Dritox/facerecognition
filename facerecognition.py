@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 import requests
+import os
 import cv2
 import numpy as np
 from deepface import DeepFace
