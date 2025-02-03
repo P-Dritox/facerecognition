@@ -8,6 +8,9 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)  # Habilita CORS para aceptar solicitudes de cualquier origen
 
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
 def download_image_from_drive(file_id):
     """
     Descarga una imagen desde Google Drive y la devuelve como una matriz en memoria.
@@ -31,7 +34,7 @@ def compare_faces(image1_path, image2_path):
     Compara dos imágenes usando DeepFace y retorna una medida de similitud.
     """
     try:
-        result = DeepFace.verify(image1_path, image2_path, model_name="Facenet")
+        result = DeepFace.verify(image1_path, image2_path, model_name="SFace", detector_backend="opencv")
         return result["verified"], result["distance"]
     except Exception as e:
         print(f"Error al comparar rostros con DeepFace: {e}")
