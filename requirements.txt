@@ -2,7 +2,7 @@ gunicorn
 tf-keras
 Flask
 requests
-opencv-python
+opencv-python-headless
 numpy
 deepface
 Flask-Cors
