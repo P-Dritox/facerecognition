@@ -34,7 +34,7 @@ def compare_faces(image1_path, image2_path):
     Compara dos imágenes usando DeepFace y retorna una medida de similitud.
     """
     try:
-        result = DeepFace.verify(image1_path, image2_path, model_name="SFace", detector_backend="opencv")
+        result = DeepFace.verify(image1_path, image2_path, model_name="VGG-Face", detector_backend="opencv")
         return result["verified"], result["distance"]
     except Exception as e:
         print(f"Error al comparar rostros con DeepFace: {e}")
