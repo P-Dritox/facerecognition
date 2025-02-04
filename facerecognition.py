@@ -29,16 +29,27 @@ def download_image_from_drive(file_id):
         print(f"Error al descargar la imagen: {e}")
         return None
 
+def is_valid_image_path(image_path):
+    """
+    Verifica si la ruta del archivo de imagen es válida.
+    """
+    return isinstance(image_path, str) and os.path.exists(image_path) and image_path.lower().endswith(('.jpg', '.jpeg', '.png'))
+
 def compare_faces(image1_path, image2_path):
     """
     Compara dos imágenes usando DeepFace y retorna una medida de similitud.
     """
     try:
+        # Validar las rutas de las imágenes
+        if not is_valid_image_path(image1_path) or not is_valid_image_path(image2_path):
+            print("Error: Una o ambas rutas de imágenes no son válidas.")
+            return False, 1
+
         result = DeepFace.verify(image1_path, image2_path, model_name="VGG-Face", detector_backend="opencv")
-        return result["verified"], result["distance"]
+        return result.get("verified", False), result.get("distance", 1)
     except Exception as e:
         print(f"Error al comparar rostros con DeepFace: {e}")
-        return None, None
+        return False, 1
 
 @app.route('/compare_faces_from_drive', methods=['POST'])
 def compare_faces_from_drive():
