@@ -11,6 +11,7 @@ CORS(app)
 
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 def download_image_from_drive(file_id):
     """
@@ -45,7 +46,7 @@ def compare_faces(image1_path, image2_path):
             print("Error: Una o ambas rutas de imágenes no son válidas.")
             return False, 1
 
-        result = DeepFace.verify(image1_path, image2_path, model_name="VGG-Face", detector_backend="opencv")
+        result = DeepFace.verify(image1_path, image2_path, model_name="Facenet", enforce_detection=False, detector_backend="mtcnn")
         return result.get("verified", False), result.get("distance", 1)
     except Exception as e:
         print(f"Error al comparar rostros con DeepFace: {e}")
@@ -108,4 +109,4 @@ def compare_faces_from_drive():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(threaded=True, debug=True, host='0.0.0.0', port=5000)
