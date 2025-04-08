@@ -36,17 +36,6 @@ def is_valid_image_path(image_path):
     """
     return isinstance(image_path, str) and os.path.exists(image_path) and image_path.lower().endswith(('.jpg', '.jpeg', '.png'))
 
-def image_has_face(image_path):
-    """
-    Verifica si una imagen contiene al menos un rostro detectable.
-    """
-    try:
-        faces = DeepFace.extract_faces(img_path=image_path, detector_backend="mtcnn", enforce_detection=True)
-        return len(faces) > 0
-    except Exception as e:
-        print(f"No se detectó un rostro en la imagen: {e}")
-        return False
-
 def compare_faces(image1_path, image2_path):
     """
     Compara dos imágenes usando DeepFace y retorna una medida de similitud.
@@ -57,16 +46,65 @@ def compare_faces(image1_path, image2_path):
             print("Error: Una o ambas rutas de imágenes no son válidas.")
             return False, 1
 
-        # Validar que ambas imágenes contengan un rostro
-        if not image_has_face(image1_path) or not image_has_face(image2_path):
-            print("Error: Una o ambas imágenes no contienen un rostro válido.")
-            return False, 1
-
         result = DeepFace.verify(image1_path, image2_path, model_name="Facenet", enforce_detection=False, detector_backend="mtcnn")
         return result.get("verified", False), result.get("distance", 1)
     except Exception as e:
         print(f"Error al comparar rostros con DeepFace: {e}")
         return False, 1
+
+@app.route('/validate_face_from_drive', methods=['POST'])
+def validate_face_from_drive():
+    """
+    Verifica si una imagen contiene un rostro válido utilizando su file_id desde Google Drive.
+    """
+    try:
+        print("Solicitud recibida para validar rostro")
+        print(f"Headers: {request.headers}")
+        print(f"Data: {request.data}")
+
+        data = request.get_json()
+        print(f"JSON recibido: {data}")
+
+        file_id = data.get('file_id')
+
+        if not file_id:
+            print("Falta file_id en la solicitud")
+            return jsonify({"error": "Por favor, proporciona el file_id."}), 400
+
+        # Descargar imagen desde Google Drive
+        image = download_image_from_drive(file_id)
+
+        if image is None:
+            return jsonify({"error": "No se pudo descargar la imagen."}), 400
+
+        # Guardar imagen temporalmente para DeepFace
+        temp_path = "temp_validate.jpg"
+        cv2.imwrite(temp_path, image)
+
+        try:
+            # Intentar detectar rostros
+            faces = DeepFace.extract_faces(img_path=temp_path, detector_backend="mtcnn", enforce_detection=True)
+            if len(faces) > 0:
+                return jsonify({
+                    "valid": True,
+                    "message": "La imagen contiene al menos un rostro válido."
+                })
+            else:
+                return jsonify({
+                    "valid": False,
+                    "message": "No se detectaron rostros en la imagen."
+                })
+        except Exception as e:
+            print(f"No se detectó un rostro: {e}")
+            return jsonify({
+                "valid": False,
+                "message": "No se detectó un rostro en la imagen.",
+                "error": str(e)
+            })
+
+    except Exception as e:
+        print(f"Error en la validación de rostro: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/compare_faces_from_drive', methods=['POST'])
 def compare_faces_from_drive():
