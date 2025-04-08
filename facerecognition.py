@@ -36,6 +36,17 @@ def is_valid_image_path(image_path):
     """
     return isinstance(image_path, str) and os.path.exists(image_path) and image_path.lower().endswith(('.jpg', '.jpeg', '.png'))
 
+def image_has_face(image_path):
+    """
+    Verifica si una imagen contiene al menos un rostro detectable.
+    """
+    try:
+        faces = DeepFace.extract_faces(img_path=image_path, detector_backend="mtcnn", enforce_detection=True)
+        return len(faces) > 0
+    except Exception as e:
+        print(f"No se detectó un rostro en la imagen: {e}")
+        return False
+
 def compare_faces(image1_path, image2_path):
     """
     Compara dos imágenes usando DeepFace y retorna una medida de similitud.
@@ -44,6 +55,11 @@ def compare_faces(image1_path, image2_path):
         # Validar las rutas de las imágenes
         if not is_valid_image_path(image1_path) or not is_valid_image_path(image2_path):
             print("Error: Una o ambas rutas de imágenes no son válidas.")
+            return False, 1
+
+        # Validar que ambas imágenes contengan un rostro
+        if not image_has_face(image1_path) or not image_has_face(image2_path):
+            print("Error: Una o ambas imágenes no contienen un rostro válido.")
             return False, 1
 
         result = DeepFace.verify(image1_path, image2_path, model_name="Facenet", enforce_detection=False, detector_backend="mtcnn")
