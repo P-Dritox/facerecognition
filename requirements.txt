@@ -6,3 +6,5 @@ opencv-python-headless
 numpy
 deepface
 Flask-Cors
+python-dotenv
+mysql-connector-python
