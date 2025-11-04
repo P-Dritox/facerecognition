@@ -34,7 +34,8 @@ def get_db_connection():
             user=os.getenv("DB_USER"),        # kaizen_api
             password=os.getenv("DB_PASS"),
             database="bdKaizen",
-            port=os.getenv("DB_PORT")
+            port=os.getenv("DB_PORT"),
+            ssl_disabled=True
         )
         return conn
     except Exception as e:
