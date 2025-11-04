@@ -20,25 +20,27 @@ os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
-# ============================================================
-# CONEXIÓN A BASE DE DATOS
-# ============================================================
-def get_db_connection():
+# --------------------------------------------------
+# Base de datos
+# --------------------------------------------------
+conn = get_db_connection()
+if conn:
+    print("[DB] Conexión establecida", flush=True)
+    cursor = conn.cursor()
+    update_query = """
+        UPDATE rhClockV
+        SET ckBiometrics = %s
+        WHERE ClockID = %s;
     """
-    Retorna una conexión a la base de datos bdKaizen usando variables de entorno de Render.
-    """
-    try:
-        conn = mysql.connector.connect(
-            host=os.getenv("DB_HOST"),
-            user=os.getenv("DB_USER"),        # kaizen_api
-            password=os.getenv("DB_PASS"),
-            database="bdKaizen",
-            port=os.getenv("DB_PORT")
-        )
-        return conn
-    except Exception as e:
-        print(f"[ERROR] No se pudo conectar a la base de datos: {e}")
-        return None
+    print(f"[DB] Ejecutando: UPDATE rhClockV SET ckBiometrics={similarity_score} WHERE ClockID={clock_id}", flush=True)
+    cursor.execute(update_query, (similarity_score, clock_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print(f"[DB] Columna actualizada correctamente para ClockID={clock_id}", flush=True)
+else:
+    print("[DB] No se pudo establecer conexión con la base de datos", flush=True)
+
 
 # ============================================================
 # FUNCIONES AUXILIARES
@@ -174,7 +176,9 @@ def compare_faces_from_drive():
 
 
 # ============================================================
-# EJECUCIÓN DEL SERVIDOR
+# INICIO DEL SERVIDOR
 # ============================================================
 if __name__ == '__main__':
-    app.run(threaded=True, debug=True, host='0.0.0.0', port=5000)
+    port = int(os.getenv("PORT", 5000))
+    print(f"[INFO] Iniciando servidor en puerto {port}", flush=True)
+    app.run(threaded=True, debug=True, host='0.0.0.0', port=port)
