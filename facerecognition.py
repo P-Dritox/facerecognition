@@ -7,7 +7,7 @@ import uuid
 from deepface import DeepFace
 from flask_cors import CORS
 
-app = Flask(_name_)
+app = Flask(__name__)
 CORS(app)
 
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
