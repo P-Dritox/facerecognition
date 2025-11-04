@@ -3,10 +3,11 @@ import requests
 import os
 import cv2
 import numpy as np
+import uuid
 from deepface import DeepFace
 from flask_cors import CORS
 
-app = Flask(__name__)
+app = Flask(_name_)
 CORS(app)
 
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
@@ -41,7 +42,6 @@ def compare_faces(image1_path, image2_path):
     Compara dos imágenes usando DeepFace y retorna una medida de similitud.
     """
     try:
-        # Validar las rutas de las imágenes
         if not is_valid_image_path(image1_path) or not is_valid_image_path(image2_path):
             print("Error: Una o ambas rutas de imágenes no son válidas.")
             return False, 1
@@ -71,19 +71,19 @@ def validate_face_from_drive():
             print("Falta file_id en la solicitud")
             return jsonify({"error": "Por favor, proporciona el file_id."}), 400
 
-        # Descargar imagen desde Google Drive
         image = download_image_from_drive(file_id)
 
         if image is None:
             return jsonify({"error": "No se pudo descargar la imagen."}), 400
 
-        # Guardar imagen temporalmente para DeepFace
-        temp_path = "temp_validate.jpg"
+        # Crear un nombre único temporal
+        request_id = str(uuid.uuid4())
+        temp_path = f"/tmp/temp_validate_{request_id}.jpg"
         cv2.imwrite(temp_path, image)
 
         try:
-            # Intentar detectar rostros
             faces = DeepFace.extract_faces(img_path=temp_path, detector_backend="mtcnn", enforce_detection=True)
+            os.remove(temp_path)
             if len(faces) > 0:
                 return jsonify({
                     "valid": True,
@@ -96,6 +96,8 @@ def validate_face_from_drive():
                 })
         except Exception as e:
             print(f"No se detectó un rostro: {e}")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
             return jsonify({
                 "valid": False,
                 "message": "No se detectó un rostro en la imagen.",
@@ -126,24 +128,32 @@ def compare_faces_from_drive():
             print("Faltan file_id1 o file_id2 en la solicitud")
             return jsonify({"error": "Por favor, proporciona ambos file_ids."}), 400
 
-        # Descargar imágenes desde Google Drive
         image1 = download_image_from_drive(file_id1)
         image2 = download_image_from_drive(file_id2)
 
         if image1 is None or image2 is None:
             return jsonify({"error": "No se pudo descargar una o ambas imágenes."}), 400
 
-        # Guardar imágenes temporalmente para DeepFace
-        cv2.imwrite("temp_image1.jpg", image1)
-        cv2.imwrite("temp_image2.jpg", image2)
+        # Crear nombres únicos por solicitud
+        request_id = str(uuid.uuid4())
+        temp1 = f"/tmp/temp_image1_{request_id}.jpg"
+        temp2 = f"/tmp/temp_image2_{request_id}.jpg"
+
+        cv2.imwrite(temp1, image1)
+        cv2.imwrite(temp2, image2)
 
         attempts = 0
         match, distance = None, None
         while attempts < 2:
-            match, distance = compare_faces("temp_image1.jpg", "temp_image2.jpg")
+            match, distance = compare_faces(temp1, temp2)
             if match:
                 break
             attempts += 1
+
+        if os.path.exists(temp1):
+            os.remove(temp1)
+        if os.path.exists(temp2):
+            os.remove(temp2)
 
         if match is None:
             print("No se pudo realizar la comparación de rostros")
@@ -162,5 +172,5 @@ def compare_faces_from_drive():
         print(f"Error en la comparación: {e}")
         return jsonify({"error": str(e)}), 500
 
-if __name__ == '__main__':
+if _name_ == '_main_':
     app.run(threaded=True, debug=True, host='0.0.0.0', port=5000)
