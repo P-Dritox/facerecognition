@@ -172,5 +172,5 @@ def compare_faces_from_drive():
         print(f"Error en la comparación: {e}")
         return jsonify({"error": str(e)}), 500
 
-if _name_ == '_main_':
+if __name__ == '_main_':
     app.run(threaded=True, debug=True, host='0.0.0.0', port=5000)
