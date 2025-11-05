@@ -8,3 +8,4 @@ deepface
 Flask-Cors
 python-dotenv
 mysql-connector-python
+cryptography>=42.0.0
