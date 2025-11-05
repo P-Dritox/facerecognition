@@ -7,5 +7,6 @@ numpy
 deepface
 Flask-Cors
 python-dotenv
-mysql-connector-python
-cryptography>=42.0.0
+mysql-connector-python==8.0.33
+cryptography==42.0.0
+pyopenssl==24.0.0
