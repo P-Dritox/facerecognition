@@ -25,24 +25,35 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 # ============================================================
 def get_db_connection():
     """
-    Retorna una conexión segura a la base de datos bdKaizen.
-    Configurada para conexiones SSL obligatorias en Cloud SQL.
+    Conexión segura a MySQL en Google Cloud SQL.
+    Usa solo el certificado server-ca.pem y evita dependencias del sistema.
     """
     try:
+        ca_path = "/etc/secrets/server-ca.pem"
+
+        if not os.path.exists(ca_path):
+            print(f"[ERROR] Certificado no encontrado en {ca_path}", flush=True)
+            return None
+
         conn = mysql.connector.connect(
             host=os.getenv("DB_HOST"),
-            user=os.getenv("DB_USER"),        
+            user=os.getenv("DB_USER"),
             password=os.getenv("DB_PASS"),
             database=os.getenv("DB_NAME", "bdKaizen"),
             port=int(os.getenv("DB_PORT", 3306)),
-            ssl_ca="/etc/secrets/server-ca.pem"
+            ssl_ca=ca_path,
+            ssl_verify_cert=True
         )
         print("[DB] Conexión SSL establecida correctamente ✅", flush=True)
         return conn
-    except Exception as e:
-        print(f"[ERROR] No se pudo conectar a la base de datos: {e}", flush=True)
+
+    except mysql.connector.Error as err:
+        print(f"[ERROR] Error MySQL: {err}", flush=True)
         return None
 
+    except Exception as e:
+        print(f"[ERROR] Error general de conexión: {e}", flush=True)
+        return None
 
 # ============================================================
 # FUNCIONES AUXILIARES
