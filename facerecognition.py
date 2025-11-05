@@ -25,22 +25,24 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 # ============================================================
 def get_db_connection():
     """
-    Retorna una conexión a la base de datos bdKaizen.
-    Las variables de entorno se configuran en Render.
+    Retorna una conexión segura a la base de datos bdKaizen.
+    Configurada para conexiones SSL obligatorias en Cloud SQL.
     """
     try:
         conn = mysql.connector.connect(
             host=os.getenv("DB_HOST"),
-            user=os.getenv("DB_USER"),        # kaizen_api
+            user=os.getenv("DB_USER"),        
             password=os.getenv("DB_PASS"),
-            database="bdKaizen",
-            port=os.getenv("DB_PORT"),
-            ssl_disabled=True
+            database=os.getenv("DB_NAME", "bdKaizen"),
+            port=int(os.getenv("DB_PORT", 3306)),
+            ssl_ca="/etc/secrets/server-ca.pem"
         )
+        print("[DB] Conexión SSL establecida correctamente ✅", flush=True)
         return conn
     except Exception as e:
         print(f"[ERROR] No se pudo conectar a la base de datos: {e}", flush=True)
         return None
+
 
 # ============================================================
 # FUNCIONES AUXILIARES
