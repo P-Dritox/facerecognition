@@ -8,6 +8,7 @@ from flask_cors import CORS
 import uuid
 import json
 import mysql.connector
+import base64  # <--- añadido
 
 # ============================================================
 # CONFIGURACIÓN BASE
@@ -92,6 +93,25 @@ def compare_faces(image1_path, image2_path):
     except Exception as e:
         print(f"[ERROR] Error al comparar rostros con DeepFace: {e}", flush=True)
         return 1.0
+
+
+def get_face_embedding(image_np):
+    """
+    Devuelve el embedding (lista de floats) del primer rostro detectado en image_np.
+    Lanza ValueError si no se detecta rostro.
+    """
+    reps = DeepFace.represent(
+        img_path=image_np,         # admite NumPy directamente
+        model_name="Facenet",      # vector de 128 dims
+        detector_backend="mtcnn",
+        enforce_detection=True,
+        align=True
+    )
+    # represent() retorna lista de dicts (uno por rostro detectado)
+    if isinstance(reps, list) and len(reps) > 0 and "embedding" in reps[0]:
+        emb = reps[0]["embedding"]
+        return [float(x) for x in emb]
+    raise ValueError("No se obtuvo embedding de la imagen.")
 
 # ============================================================
 # ENDPOINT 1: VALIDAR ROSTRO EN IMAGEN
@@ -217,6 +237,110 @@ def compare_faces_from_drive():
     except Exception as e:
         print(f"[ERROR] Error general en compare_faces_from_drive: {e}", flush=True)
         return Response(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
+
+
+# ============================================================
+# ENDPOINT 3: EMBEDDING FACIAL (OPCIONALMENTE PERSISTE EN BD)
+# ============================================================
+@app.route('/face_embedding', methods=['POST'])
+def face_embedding():
+    """
+    Obtiene el embedding facial usando DeepFace (Facenet).
+
+    Formas de uso:
+    - multipart/form-data con un archivo en el campo 'image'
+    - JSON: {"file_id": "<id de Google Drive>"}  (o "image_base64": "data:image/..;base64,....")
+
+    Comportamiento:
+    - Si SOLO envías imagen (sin staff_id), devuelve el embedding como STRING (valores separados por coma).
+    - Si envías staff_id, guarda el embedding en bdKaizen.rhStaff.FaceEmbedding (JSON) y responde en JSON.
+    """
+    try:
+        print("\n[INFO] Solicitud /face_embedding", flush=True)
+
+        image_np = None
+        staff_id = None
+
+        # 1) multipart/form-data
+        if 'image' in request.files:
+            file = request.files['image']
+            raw = np.frombuffer(file.read(), dtype=np.uint8)
+            image_np = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+            staff_id = request.form.get('staff_id')
+
+        else:
+            # 2) JSON
+            data = request.get_json(silent=True) or {}
+            staff_id = data.get('staff_id')
+
+            # file_id de Drive
+            file_id = data.get('file_id')
+            if file_id and image_np is None:
+                image_np = download_image_from_drive(file_id)
+
+            # image_base64 (opcional)
+            if image_np is None and data.get('image_base64'):
+                b64 = data['image_base64']
+                if ',' in b64:  # soporta data URL
+                    b64 = b64.split(',', 1)[1]
+                raw = base64.b64decode(b64)
+                image_np = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+
+        if image_np is None:
+            return Response(
+                json.dumps({"error": "Debes enviar 'image' (multipart), 'file_id' (Drive) o 'image_base64' (JSON)"}),
+                mimetype="application/json", status=400
+            )
+
+        # 1) Obtener embedding
+        embedding = get_face_embedding(image_np)  # lista de floats
+        print(f"[OK] Embedding generado. Dim={len(embedding)}", flush=True)
+
+        # 2) ¿Guardar en BD?
+        if staff_id:
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cursor = conn.cursor()
+                    emb_json = json.dumps(embedding, ensure_ascii=False)
+                    sql = """
+                        UPDATE rhStaff
+                           SET FaceEmbedding = %s
+                         WHERE StaffID = %s
+                    """
+                    params = (emb_json, staff_id)
+                    print(f"[DB] Guardando embedding en rhStaff (StaffID={staff_id})", flush=True)
+                    cursor.execute(sql, params)
+                    conn.commit()
+                    print("[DB] ✅ FaceEmbedding actualizado", flush=True)
+                except Exception as dbe:
+                    print(f"[DB][ERROR] No se pudo guardar FaceEmbedding: {dbe}", flush=True)
+                finally:
+                    try:
+                        cursor.close()
+                        conn.close()
+                    except Exception:
+                        pass
+
+            # Respuesta JSON cuando se guarda
+            result = {
+                "model": "Facenet",
+                "dimension": len(embedding),
+                "embedding": embedding,
+                "saved_for_staff_id": staff_id
+            }
+            return Response(json.dumps(result), mimetype="application/json", status=200)
+
+        # 3) Si NO hay staff_id: devolver como STRING (coma-separado)
+        emb_str = ",".join(str(x) for x in embedding)
+        return Response(emb_str, mimetype="text/plain", status=200)
+
+    except Exception as e:
+        msg = str(e)
+        print(f"[ERROR] /face_embedding -> {msg}", flush=True)
+        status = 422 if "face" in msg.lower() or "rostro" in msg.lower() else 500
+        return Response(json.dumps({"error": msg}), mimetype="application/json", status=status)
+
 
 
 # ============================================================
