@@ -1,4 +1,4 @@
-from flask import Flask, request, Response
+from flask import Flask, request, Response, deepface 
 import requests
 import os
 import cv2
@@ -8,7 +8,8 @@ from flask_cors import CORS
 import uuid
 import json
 import mysql.connector
-import base64  # <--- añadido
+import base64
+import DeepFace
 
 # ============================================================
 # CONFIGURACIÓN BASE
@@ -20,6 +21,9 @@ CORS(app)
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+MODEL_NAME = "Facenet"
+MODEL_FACENET = DeepFace.build_model(MODEL_NAME)
 
 # ============================================================
 # CONEXIÓN A BASE DE DATOS
@@ -94,24 +98,58 @@ def compare_faces(image1_path, image2_path):
         print(f"[ERROR] Error al comparar rostros con DeepFace: {e}", flush=True)
         return 1.0
 
+def limit_image_size(img_np, max_side=640):
+    h, w = img_np.shape[:2]
+    m = max(h, w)
+    if m <= max_side:
+        return img_np
+    scale = max_side / float(m)
+    new_w, new_h = int(w * scale), int(h * scale)
+    return cv2.resize(img_np, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
 
 def get_face_embedding(image_np):
-    """
-    Devuelve el embedding (lista de floats) del primer rostro detectado en image_np.
-    Lanza ValueError si no se detecta rostro.
-    """
-    reps = DeepFace.represent(
-        img_path=image_np,         # admite NumPy directamente
-        model_name="Facenet",      # vector de 128 dims
-        detector_backend="mtcnn",
-        enforce_detection=True,
-        align=True
-    )
-    # represent() retorna lista de dicts (uno por rostro detectado)
-    if isinstance(reps, list) and len(reps) > 0 and "embedding" in reps[0]:
-        emb = reps[0]["embedding"]
-        return [float(x) for x in emb]
-    raise ValueError("No se obtuvo embedding de la imagen.")
+    # Convertir a RGB y reducir tamaño
+    if image_np is None:
+        raise ValueError("Imagen vacía")
+    img = cv2.cvtColor(limit_image_size(image_np), cv2.COLOR_BGR2RGB)
+
+    # 1er intento: detector ligero
+    try:
+        reps = DeepFace.represent(
+            img_path=img,
+            model=MODEL_FACENET,             # reusar modelo precargado
+            model_name=MODEL_NAME,           # explícito por claridad
+            detector_backend="opencv",       # ligero
+            enforce_detection=False          # no reventar si no detecta
+        )
+    except Exception:
+        reps = []
+
+    # Fallback a MTCNN si opencv no entrega embedding
+    if not reps:
+        try:
+            reps = DeepFace.represent(
+                img_path=img,
+                model=MODEL_FACENET,
+                model_name=MODEL_NAME,
+                detector_backend="mtcnn",
+                enforce_detection=True        # acá sí exigimos detección
+            )
+        except Exception as e:
+            raise RuntimeError(f"No se pudo obtener embedding: {e}")
+
+    # DeepFace.represent devuelve una lista de dicts; tomamos el primero
+    if isinstance(reps, list) and reps:
+        emb = reps[0].get("embedding")
+    elif isinstance(reps, dict):
+        emb = reps.get("embedding")
+    else:
+        emb = None
+
+    if not emb:
+        raise RuntimeError("DeepFace no retornó embedding")
+    return [float(x) for x in emb]
 
 # ============================================================
 # ENDPOINT 1: VALIDAR ROSTRO EN IMAGEN
