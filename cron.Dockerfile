@@ -1,17 +1,16 @@
 FROM alpine:3.20
 
-# Instala dependencias necesarias
+# Instalar dependencias
 RUN apk add --no-cache bash curl unzip
 
-# Descarga binario de Render CLI desde GitHub (última versión estable)
-RUN curl -L "https://github.com/render-oss/cli/releases/latest/download/render-linux-amd64.zip" -o render.zip && \
-    unzip render.zip -d /usr/local/bin && \
-    mv /usr/local/bin/render-linux-amd64 /usr/local/bin/render && \
-    chmod +x /usr/local/bin/render && \
-    rm render.zip
+# Descargar e instalar Render CLI desde la fuente oficial (no GitHub)
+RUN curl -fsSL https://render.com/static/cli/install.sh -o /tmp/install.sh && \
+    bash /tmp/install.sh && \
+    cp /root/.render/render /usr/local/bin/render && \
+    chmod +x /usr/local/bin/render
 
-# Verifica instalación
-RUN render --version || echo "Render CLI ready"
+# Verificar instalación
+RUN /usr/local/bin/render --version || echo "Render CLI ready"
 
-# Ejecuta el comando de encendido
+# Comando principal: encender el servicio
 CMD ["bash", "-c", "render services resume facerecognition"]
