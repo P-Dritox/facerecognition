@@ -1,4 +1,4 @@
-from flask import Flask, request, Response, deepface 
+from flask import Flask, request, Response
 import requests
 import os
 import cv2
@@ -9,7 +9,6 @@ import uuid
 import json
 import mysql.connector
 import base64
-import DeepFace
 
 # ============================================================
 # CONFIGURACIÓN BASE
