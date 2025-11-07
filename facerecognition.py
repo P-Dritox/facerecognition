@@ -117,7 +117,6 @@ def get_face_embedding(image_np):
     try:
         reps = DeepFace.represent(
             img_path=img,
-            model=MODEL_FACENET,             # reusar modelo precargado
             model_name=MODEL_NAME,           # explícito por claridad
             detector_backend="opencv",       # ligero
             enforce_detection=False          # no reventar si no detecta
@@ -130,7 +129,6 @@ def get_face_embedding(image_np):
         try:
             reps = DeepFace.represent(
                 img_path=img,
-                model=MODEL_FACENET,
                 model_name=MODEL_NAME,
                 detector_backend="mtcnn",
                 enforce_detection=True        # acá sí exigimos detección
