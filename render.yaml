@@ -15,7 +15,7 @@ services:
     runtime: docker
     region: oregon
     plan: starter
-    schedule: "* * * * *"
+    schedule: "0 2 * * *"
     dockerfilePath: ./cron.Dockerfile
 
 
