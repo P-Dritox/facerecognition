@@ -1,0 +1,28 @@
+services:
+  # Servicio principal
+  - type: web
+    name: facerecognition
+    runtime: python
+    region: oregon
+    plan: standard
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 2 -b 0.0.0.0:$PORT facerecognition:app
+    autoDeploy: true
+
+
+  - type: cron
+    name: cron-facerecognition-start
+    runtime: docker
+    region: oregon
+    plan: starter
+    schedule: "* * * * *"
+    dockerfilePath: ./cron.Dockerfile
+
+
+  - type: cron
+    name: cron-facerecognition-stop
+    runtime: docker
+    region: oregon
+    plan: starter
+    schedule: "0 3 * * *"
+    dockerfilePath: ./cron-stop.Dockerfile
