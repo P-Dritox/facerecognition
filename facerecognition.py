@@ -8,7 +8,9 @@ from flask_cors import CORS
 import uuid
 import json
 import mysql.connector
-import base64  # <--- añadido
+from mysql.connector import pooling
+import base64
+import time
 
 # ============================================================
 # CONFIGURACIÓN BASE
@@ -16,44 +18,83 @@ import base64  # <--- añadido
 app = Flask(__name__)
 CORS(app)
 
-# TensorFlow: Forzar CPU
+# TensorFlow: Forzar CPU y evitar preasignación
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 # ============================================================
-# CONEXIÓN A BASE DE DATOS
+# MODELO FACIAL (warm-up 1 vez por proceso)
 # ============================================================
+_FACE_MODEL_WARMED = False
+
+def warm_face_model():
+    """
+    Carga el modelo Facenet una sola vez por proceso, para que
+    represent() / verify() no tengan que inicializarlo en caliente.
+    No pasamos 'model=' a represent() para ser compatibles con tu versión.
+    """
+    global _FACE_MODEL_WARMED
+    if not _FACE_MODEL_WARMED:
+        t0 = time.time()
+        try:
+            DeepFace.build_model("Facenet")
+            _FACE_MODEL_WARMED = True
+            print(f"[ML] Facenet cargado en {time.time()-t0:.2f}s", flush=True)
+        except Exception as e:
+            print(f"[ML][WARN] No se pudo precargar Facenet: {e}", flush=True)
+
+# Llamamos al warmup al iniciar el módulo
+warm_face_model()
+
+# ============================================================
+# CONEXIÓN A BASE DE DATOS (POOL)
+# ============================================================
+_db_pool = None
+
+def init_db_pool():
+    """Inicializa un pool de conexiones MySQL (1 sola vez)."""
+    global _db_pool
+    if _db_pool is not None:
+        return
+    ca_path = "/etc/secrets/server-ca.pem"
+    use_ssl = os.getenv("DB_SSL", "1") == "1"
+    ssl_ca = ca_path if (use_ssl and os.path.exists(ca_path)) else None
+    if use_ssl and not os.path.exists(ca_path):
+        print(f"[DB][WARN] Certificado no encontrado en {ca_path}. Conectando sin SSL...", flush=True)
+
+    _db_pool = pooling.MySQLConnectionPool(
+        pool_name="kaizen_pool",
+        pool_size=int(os.getenv("DB_POOL_SIZE", "4")),
+        pool_reset_session=False,
+        host=os.getenv("DB_HOST"),                # mejor IP literal
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASS"),
+        database=os.getenv("DB_NAME", "bdKaizen"),
+        port=int(os.getenv("DB_PORT", 3306)),
+        ssl_ca=ssl_ca,
+        ssl_verify_cert=bool(ssl_ca),
+        connection_timeout=int(os.getenv("DB_CONN_TIMEOUT", "6")),
+        compress=True
+    )
+    print("[DB] Pool inicializado ✅", flush=True)
+
 def get_db_connection():
     """
-    Conexión segura a MySQL en Google Cloud SQL.
-    Usa solo el certificado server-ca.pem y evita dependencias del sistema.
+    Obtiene una conexión del pool. Loguea latencia de adquisición.
     """
     try:
-        ca_path = "/etc/secrets/server-ca.pem"
-
-        if not os.path.exists(ca_path):
-            print(f"[ERROR] Certificado no encontrado en {ca_path}", flush=True)
-            return None
-
-        conn = mysql.connector.connect(
-            host=os.getenv("DB_HOST"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASS"),
-            database=os.getenv("DB_NAME", "bdKaizen"),
-            port=int(os.getenv("DB_PORT", 3306)),
-            ssl_ca=ca_path,
-            ssl_verify_cert=True
-        )
-        print("[DB] Conexión SSL establecida correctamente ✅", flush=True)
+        init_db_pool()
+        t0 = time.time()
+        conn = _db_pool.get_connection()
+        conn.autocommit = True
+        print(f"[DB] Conexión del pool en {time.time()-t0:.3f}s", flush=True)
         return conn
-
     except mysql.connector.Error as err:
-        print(f"[ERROR] Error MySQL: {err}", flush=True)
+        print(f"[DB][ERROR] {err}", flush=True)
         return None
-
     except Exception as e:
-        print(f"[ERROR] Error general de conexión: {e}", flush=True)
+        print(f"[DB][ERROR] General: {e}", flush=True)
         return None
 
 # ============================================================
@@ -76,18 +117,19 @@ def download_image_from_drive(file_id):
         print(f"[ERROR] Error al descargar la imagen: {e}", flush=True)
         return None
 
-
 def compare_faces(image1_path, image2_path):
     """
     Compara dos imágenes de rostros y devuelve la distancia.
+    (Usa warming del modelo; no pasamos 'model=' para compatibilidad).
     """
     try:
+        warm_face_model()
         result = DeepFace.verify(
-            image1_path,
-            image2_path,
+            img1_path=image1_path,
+            img2_path=image2_path,
             model_name="Facenet",
             enforce_detection=False,
-            detector_backend="mtcnn"
+            detector_backend=os.getenv("DF_DETECTOR", "mtcnn")  # mtcnn / retinaface / opencv
         )
         return result.get("distance", 1.0)
     except Exception as e:
@@ -99,19 +141,44 @@ def get_face_embedding(image_np):
     """
     Devuelve el embedding (lista de floats) del primer rostro detectado en image_np.
     Lanza ValueError si no se detecta rostro.
+    No se pasa 'model=' porque tu versión de DeepFace no lo soporta (error previo).
     """
+    warm_face_model()
     reps = DeepFace.represent(
-        img_path=image_np,         # admite NumPy directamente
-        model_name="Facenet",      # vector de 128 dims
-        detector_backend="mtcnn",
+        img_path=image_np,                # acepta numpy array
+        model_name="Facenet",             # 128 dims
+        detector_backend=os.getenv("DF_DETECTOR", "mtcnn"),
         enforce_detection=True,
         align=True
     )
-    # represent() retorna lista de dicts (uno por rostro detectado)
     if isinstance(reps, list) and len(reps) > 0 and "embedding" in reps[0]:
         emb = reps[0]["embedding"]
         return [float(x) for x in emb]
     raise ValueError("No se obtuvo embedding de la imagen.")
+
+# ============================================================
+# HEALTHCHECK DB / LATENCIA
+# ============================================================
+@app.route("/db_ping")
+def db_ping():
+    t0 = time.time()
+    conn = get_db_connection()
+    if not conn:
+        return {"ok": False, "ms": None}, 503
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.fetchall()
+        cur.close()
+        conn.close()
+        ms = int((time.time() - t0) * 1000)
+        return {"ok": True, "ms": ms}, 200
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        return {"ok": False, "error": str(e)}, 500
 
 # ============================================================
 # ENDPOINT 1: VALIDAR ROSTRO EN IMAGEN
@@ -140,7 +207,12 @@ def validate_face_from_drive():
         cv2.imwrite(temp_path, image)
 
         try:
-            faces = DeepFace.extract_faces(img_path=temp_path, detector_backend="mtcnn", enforce_detection=True)
+            warm_face_model()
+            faces = DeepFace.extract_faces(
+                img_path=temp_path,
+                detector_backend=os.getenv("DF_DETECTOR", "mtcnn"),
+                enforce_detection=True
+            )
             if len(faces) > 0:
                 print("[RESULTADO] Rostro detectado ✅", flush=True)
                 result = {"valid": True, "message": "La imagen contiene al menos un rostro válido."}
@@ -211,18 +283,26 @@ def compare_faces_from_drive():
         conn = get_db_connection()
         if conn:
             print("[DB] Conexión establecida ✅", flush=True)
-            cursor = conn.cursor()
-            update_query = """
-                UPDATE rhClockV
-                SET ckBiometrics = %s
-                WHERE ClockID = %s;
-            """
-            print(f"[DB] Ejecutando: UPDATE rhClockV SET ckBiometrics={similarity_score} WHERE ClockID={clock_id}", flush=True)
-            cursor.execute(update_query, (similarity_score, clock_id))
-            conn.commit()
-            cursor.close()
-            conn.close()
-            print(f"[DB] ✅ ckBiometrics actualizado correctamente en ClockID={clock_id}", flush=True)
+            try:
+                t0 = time.time()
+                cursor = conn.cursor()
+                update_query = """
+                    UPDATE rhClockV
+                       SET ckBiometrics = %s
+                     WHERE ClockID = %s
+                """
+                print(f"[DB] UPDATE ckBiometrics={similarity_score} ClockID={clock_id}", flush=True)
+                cursor.execute(update_query, (similarity_score, clock_id))
+                conn.commit()
+                print(f"[DB] ✅ UPDATE ok en {time.time()-t0:.3f}s", flush=True)
+            except Exception as dbe:
+                print(f"[DB][ERROR] {dbe}", flush=True)
+            finally:
+                try:
+                    cursor.close()
+                    conn.close()
+                except:
+                    pass
         else:
             print("[WARN] No se pudo conectar a la base de datos", flush=True)
 
@@ -300,6 +380,7 @@ def face_embedding():
         if staff_id:
             conn = get_db_connection()
             if conn:
+                print("[DB] Conexión establecida ✅", flush=True)
                 try:
                     cursor = conn.cursor()
                     emb_json = json.dumps(embedding, ensure_ascii=False)
@@ -321,6 +402,8 @@ def face_embedding():
                         conn.close()
                     except Exception:
                         pass
+            else:
+                print("[WARN] No se pudo conectar a la base de datos", flush=True)
 
             # Respuesta JSON cuando se guarda
             result = {
@@ -341,12 +424,12 @@ def face_embedding():
         status = 422 if "face" in msg.lower() or "rostro" in msg.lower() else 500
         return Response(json.dumps({"error": msg}), mimetype="application/json", status=status)
 
-
-
 # ============================================================
-# EJECUCIÓN DEL SERVIDOR
+# EJECUCIÓN DEL SERVIDOR (modo dev / único proceso)
 # ============================================================
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 5000))
     print(f"[INFO] Iniciando servidor en puerto {port}", flush=True)
+    # Warm-up explícito también en modo dev
+    warm_face_model()
     app.run(threaded=True, debug=True, host='0.0.0.0', port=port)
