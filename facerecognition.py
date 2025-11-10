@@ -24,6 +24,8 @@ from deepface import DeepFace
 import mysql.connector
 import base64
 import gc
+import logging, sys
+
 
 # Silenciar aún más logs de TF/absl
 try:
@@ -42,7 +44,10 @@ CORS(app)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
+    stream=sys.stdout
 )
+log = logging.getLogger(__name__)
+
 
 def rid():
     return str(uuid.uuid4())[:8]
@@ -50,7 +55,7 @@ def rid():
 def log_i(msg): logging.info(msg)
 def log_w(msg): logging.warning(msg)
 def log_e(msg): logging.error(msg)
-
+    
 # ============================================================
 # CARGA LAZY DEL MODELO
 # ============================================================
@@ -106,6 +111,39 @@ def get_db_connection(retries: int = 1, delay: float = 0.4):
 # ============================================================
 # UTIL
 # ============================================================
+
+def persist_score(clock_id: str, score: float) -> bool:
+    """
+    Intenta actualizar ckBiometrics con 'score' para el ClockID dado.
+    Devuelve True si actualiza; False si no pudo (sin levantar excepción).
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            log.warning("[DB] no hay conexión para persistir score=%s (ClockID=%s)", score, clock_id)
+            return False
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE rhClockV SET ckBiometrics = %s WHERE ClockID = %s;",
+                (score, clock_id)
+            )
+            conn.commit()
+            log.info("[DB] ckBiometrics=%s actualizado (ClockID=%s)", score, clock_id)
+            return True
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as e:
+        log.warning("[DB] fallo persist_score(%s): %s", clock_id, e)
+        return False
+
 def download_image_from_drive(file_id: str):
     """
     Descarga imagen desde Drive a matriz OpenCV (BGR).
@@ -223,70 +261,85 @@ def validate_face_from_drive():
 
 @app.route('/compare_faces_from_drive', methods=['POST'])
 def compare_faces_from_drive():
-    req = rid()
+    """
+    Compara dos rostros (file_id1, file_id2) y actualiza ckBiometrics en la BD.
+    REGLA: si NO se puede procesar, persiste 0.0 (si hay clock_id) y SIEMPRE responde {"similarity_score": 0.0} con 200.
+    """
+    req_id = uuid.uuid4().hex[:8]
     try:
-        log_i(f"[{req}] Nueva solicitud /compare_faces_from_drive")
-        log_i(f"[{req}] [DATA RAW] {request.data}")
+        log.info("[%s] Nueva solicitud /compare_faces_from_drive", req_id)
+        raw = request.data
+        log.info("[%s] [DATA RAW] %s", req_id, raw)
 
-        data = request.get_json(force=True)
-        file_id1 = (data or {}).get('file_id1')
-        file_id2 = (data or {}).get('file_id2')
-        clock_id = (data or {}).get('clock_id')
+        data = request.get_json(force=True) or {}
+        file_id1 = data.get('file_id1')
+        file_id2 = data.get('file_id2')
+        clock_id = data.get('clock_id')
 
         if not file_id1 or not file_id2 or not clock_id:
-            return Response(json.dumps({"error": "Faltan parámetros"}), mimetype="application/json", status=400)
+            log.error("[%s] faltan parámetros (file_id1, file_id2, clock_id)", req_id)
+            if clock_id:
+                persist_score(clock_id, 0.0)
+            return Response(json.dumps({"similarity_score": 0.0}), mimetype="application/json", status=200)
 
+        log.info("[%s] [DL] GET https://drive.google.com/uc?id=%s", req_id, file_id1)
         img1 = download_image_from_drive(file_id1)
+        log.info("[%s] [DL] GET https://drive.google.com/uc?id=%s", req_id, file_id2)
         img2 = download_image_from_drive(file_id2)
         if img1 is None or img2 is None:
-            return Response(json.dumps({"error": "No se pudieron descargar las imágenes"}), mimetype="application/json", status=400)
+            log.error("[%s] no se pudieron descargar una o ambas imágenes", req_id)
+            persist_score(clock_id, 0.0)
+            return Response(json.dumps({"similarity_score": 0.0}), mimetype="application/json", status=200)
 
-        # Reducir tamaño para bajar tiempo/RAM
-        img1 = resize_max_dim(img1, 720)
-        img2 = resize_max_dim(img2, 720)
+        tmp1 = f"/tmp/df_{req_id}_1.jpg"
+        tmp2 = f"/tmp/df_{req_id}_2.jpg"
+        cv2.imwrite(tmp1, img1)
+        cv2.imwrite(tmp2, img2)
 
-        t1 = f"/tmp/a_{req}.jpg"
-        t2 = f"/tmp/b_{req}.jpg"
-        cv2.imwrite(t1, img1, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-        cv2.imwrite(t2, img2, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-
-        dist = compare_faces(t1, t2)
-        score = round(1 - dist, 5)
-        log_i(f"[{req}] RESULT -> {'similares ✅' if score >= 0.5 else 'diferentes ❌'} | score={score}")
-
-        # Actualizar BD
-        conn = get_db_connection()
-        if conn:
-            try:
-                cur = conn.cursor()
-                sql = "UPDATE rhClockV SET ckBiometrics = %s WHERE ClockID = %s"
-                cur.execute(sql, (score, clock_id))
-                conn.commit()
-                log_i(f"[{req}] DB update OK (ClockID={clock_id})")
-            except Exception as dbe:
-                log_e(f"[{req}] DB update error: {dbe}")
-            finally:
-                try: cur.close()
-                except: pass
-                try: conn.close()
-                except: pass
-        else:
-            log_w(f"[{req}] sin conexión a BD (se devolvió score igual)")
-
-        # Limpieza
         try:
-            os.remove(t1); os.remove(t2)
-        except: pass
-        del img1, img2
-        gc.collect()
+            result = DeepFace.verify(
+                img1_path=tmp1,
+                img2_path=tmp2,
+                model_name="Facenet",
+                detector_backend="mtcnn",
+                enforce_detection=False
+            )
+            distance = float(result.get("distance", 1.0))
+            similarity = 1.0 - distance
+            similarity = max(0.0, min(1.0, similarity))
 
-        return Response(json.dumps({"similarity_score": score}), mimetype="application/json", status=200)
+            if similarity >= 0.5:
+                log.info("[%s] RESULT -> similares ✅ | score=%s", req_id, similarity)
+            else:
+                log.info("[%s] RESULT -> diferentes ❌ | score=%s", req_id, similarity)
+
+            persist_score(clock_id, similarity)
+
+            return Response(json.dumps({"similarity_score": round(similarity, 5)}), mimetype="application/json", status=200)
+
+        except Exception as e:
+            log.error("[%s] error en DeepFace.verify: %s", req_id, e)
+            persist_score(clock_id, 0.0)
+            return Response(json.dumps({"similarity_score": 0.0}), mimetype="application/json", status=200)
+
+        finally:
+            for p in (tmp1, tmp2):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
 
     except Exception as e:
-        log_e(f"[{req}] compare error: {e}")
-        gc.collect()
-        return Response(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
-
+        log.error("[%s] error general: %s", req_id, e)
+        try:
+            data = request.get_json(silent=True) or {}
+            clock_id = data.get('clock_id')
+            if clock_id:
+                persist_score(clock_id, 0.0)
+        except Exception:
+            pass
+        return Response(json.dumps({"similarity_score": 0.0}), mimetype="application/json", status=200)
+        
 @app.route('/face_embedding', methods=['POST'])
 def face_embedding():
     req = rid()
