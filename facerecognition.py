@@ -4,8 +4,6 @@ import os
 import cv2
 import numpy as np
 from deepface import DeepFace
-from deepface.basemodels import Facenet
-from deepface.detectors import FaceDetector
 from flask_cors import CORS
 import uuid
 import json
@@ -25,13 +23,11 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 # ============================================================
-# PRECARGA DE MODELOS (para evitar re-inicialización costosa)
+# PRECARGA DE MODELO (vía API pública de DeepFace)
 # ============================================================
-print("[INIT] Precargando modelos de DeepFace...", flush=True)
-facenet_model = Facenet.loadModel()
-face_detector = FaceDetector.build_model("opencv")  # más liviano que mtcnn
-print("[INIT] Modelos cargados correctamente ✅", flush=True)
-
+print("[INIT] Precargando modelo Facenet...", flush=True)
+facenet_model = DeepFace.build_model("Facenet")  # ✅ reemplaza import interno
+print("[INIT] Modelo cargado correctamente ✅", flush=True)
 
 # ============================================================
 # CONEXIÓN A BASE DE DATOS
@@ -65,7 +61,6 @@ def get_db_connection():
         print(f"[ERROR] Error general de conexión: {e}", flush=True)
         return None
 
-
 # ============================================================
 # FUNCIONES AUXILIARES
 # ============================================================
@@ -86,7 +81,6 @@ def download_image_from_drive(file_id):
         print(f"[ERROR] Error al descargar la imagen: {e}", flush=True)
         return None
 
-
 def compare_faces(image1_path, image2_path):
     """
     Compara dos imágenes de rostros y devuelve la distancia.
@@ -96,8 +90,8 @@ def compare_faces(image1_path, image2_path):
             image1_path,
             image2_path,
             model_name="Facenet",
-            model=facenet_model,
-            detector_backend="opencv",
+            model=facenet_model,        # ✅ reutiliza el modelo precargado
+            detector_backend="opencv",  # liviano
             enforce_detection=False
         )
         return result.get("distance", 1.0)
@@ -105,26 +99,21 @@ def compare_faces(image1_path, image2_path):
         print(f"[ERROR] Error al comparar rostros con DeepFace: {e}", flush=True)
         return 1.0
 
-
 def get_face_embedding(image_np):
     """
     Devuelve el embedding (vector facial) del primer rostro detectado.
     """
-    try:
-        reps = DeepFace.represent(
-            img_path=image_np,
-            model_name="Facenet",
-            detector_backend="opencv",
-            model=facenet_model,
-            enforce_detection=True
-        )
-        if isinstance(reps, list) and len(reps) > 0 and "embedding" in reps[0]:
-            emb = reps[0]["embedding"]
-            return [float(x) for x in emb]
-        raise ValueError("No se obtuvo embedding de la imagen.")
-    except Exception as e:
-        raise ValueError(f"Error obteniendo embedding: {e}")
-
+    reps = DeepFace.represent(
+        img_path=image_np,
+        model_name="Facenet",
+        model=facenet_model,        # ✅ reutiliza el modelo
+        detector_backend="opencv",
+        enforce_detection=True
+    )
+    if isinstance(reps, list) and len(reps) > 0 and "embedding" in reps[0]:
+        emb = reps[0]["embedding"]
+        return [float(x) for x in emb]
+    raise ValueError("No se obtuvo embedding de la imagen.")
 
 # ============================================================
 # ENDPOINT 1: VALIDAR ROSTRO EN IMAGEN
@@ -151,7 +140,11 @@ def validate_face_from_drive():
         temp_path = f"/tmp/temp_validate_{uuid.uuid4()}.jpg"
         cv2.imwrite(temp_path, image)
 
-        faces = DeepFace.extract_faces(img_path=temp_path, detector_backend="opencv", enforce_detection=True)
+        faces = DeepFace.extract_faces(
+            img_path=temp_path,
+            detector_backend="opencv",
+            enforce_detection=True
+        )
         os.remove(temp_path)
 
         if len(faces) > 0:
@@ -168,7 +161,6 @@ def validate_face_from_drive():
         print(f"[ERROR] /validate_face_from_drive -> {e}", flush=True)
         gc.collect()
         return Response(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
-
 
 # ============================================================
 # ENDPOINT 2: COMPARAR ROSTROS Y ACTUALIZAR BD
@@ -215,8 +207,8 @@ def compare_faces_from_drive():
             cursor = conn.cursor()
             update_query = """
                 UPDATE rhClockV
-                SET ckBiometrics = %s
-                WHERE ClockID = %s;
+                   SET ckBiometrics = %s
+                 WHERE ClockID = %s;
             """
             cursor.execute(update_query, (similarity_score, clock_id))
             conn.commit()
@@ -236,7 +228,6 @@ def compare_faces_from_drive():
         print(f"[ERROR] /compare_faces_from_drive -> {e}", flush=True)
         gc.collect()
         return Response(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
-
 
 # ============================================================
 # ENDPOINT 3: OBTENER EMBEDDING FACIAL
@@ -285,7 +276,6 @@ def face_embedding():
         print(f"[ERROR] /face_embedding -> {e}", flush=True)
         gc.collect()
         return Response(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
-
 
 # ============================================================
 # EJECUCIÓN DEL SERVIDOR
