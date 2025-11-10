@@ -1,328 +1,343 @@
+# facerecognition.py
 import os
 
-# ---- Reducir ruido de TensorFlow/absl ANTES de importar deepface/tf
+# --- Reducir ruido y huella de TF / CPU ANTES de importar DeepFace/TensorFlow ---
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"          # fuerza CPU
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"           # 0=ALL, 1=INFO-, 2=WARNING-, 3=ERROR-
-os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"           # 0=ALL, 1=INFO off, 2=WARNING off, 3=ERROR off
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"          # menos logs oneDNN
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+os.environ["GRPC_VERBOSITY"] = "ERROR"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
+os.environ["TF_NUM_INTEROP_THREADS"] = "1"
 
 from flask import Flask, request, Response
 from flask_cors import CORS
+import logging
+import uuid
+import json
+import time
 import requests
 import cv2
 import numpy as np
 from deepface import DeepFace
-import uuid
-import json
 import mysql.connector
 import base64
 import gc
 
-# Intentar bajar aún más la verbosidad de absl (si está disponible)
+# Silenciar aún más logs de TF/absl
 try:
     from absl import logging as absl_logging
     absl_logging.set_verbosity(absl_logging.ERROR)
 except Exception:
     pass
+logging.getLogger("tensorflow").setLevel(logging.ERROR)
 
 # ============================================================
-# CONFIGURACIÓN APP
+# APP / LOGGING
 # ============================================================
 app = Flask(__name__)
 CORS(app)
 
-VERBOSE = os.getenv("VERBOSE_LOGS", "1") == "1"  
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
 
-def log(msg):
-    print(msg, flush=True)
+def rid():
+    return str(uuid.uuid4())[:8]
 
-def dlog(msg):
-    if VERBOSE:
-        print(msg, flush=True)
-
-# ============================================================
-# PRECARGA (API pública) PARA USAR CACHÉ INTERNA
-# ============================================================
-log("[INIT] Precargando modelo Facenet...")
-try:
-    _ = DeepFace.build_model("Facenet")  
-    log("[INIT] Modelo cargado correctamente ✅")
-except Exception as e:
-    log(f"[INIT][WARN] No se pudo precargar Facenet: {e}. Se cargará on-demand.")
+def log_i(msg): logging.info(msg)
+def log_w(msg): logging.warning(msg)
+def log_e(msg): logging.error(msg)
 
 # ============================================================
-# DB CONEXIÓN
+# CARGA LAZY DEL MODELO
 # ============================================================
-def get_db_connection():
+_MODEL_CACHE = {"facenet": None}
+
+def get_model():
+    """Carga única del modelo Facenet (por proceso)."""
+    if _MODEL_CACHE["facenet"] is None:
+        log_i("[INIT] Cargando modelo Facenet (lazy)...")
+        _MODEL_CACHE["facenet"] = DeepFace.build_model("Facenet")
+        log_i("[INIT] Modelo Facenet listo ✅")
+    return _MODEL_CACHE["facenet"]
+
+# ============================================================
+# DB
+# ============================================================
+def get_db_connection(retries: int = 1, delay: float = 0.4):
     """
-    Conexión segura a MySQL (GCP) usando certificado SSL (solo CA).
-    Variables en Render:
-      DB_HOST, DB_USER, DB_PASS, DB_NAME (bdKaizen), DB_PORT (3306)
+    Conexión a MySQL (GCP) con SSL CA (solo server). Reintenta brevemente.
+    No toca tus variables de entorno.
     """
-    try:
-        ca_path = "/etc/secrets/server-ca.pem"
-        if not os.path.exists(ca_path):
-            log(f"[ERROR] Certificado no encontrado en {ca_path}")
-            return None
-
-        conn = mysql.connector.connect(
-            host=os.getenv("DB_HOST"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASS"),
-            database=os.getenv("DB_NAME", "bdKaizen"),
-            port=int(os.getenv("DB_PORT", 3306)),
-            ssl_ca=ca_path,
-            ssl_verify_cert=True,
-            autocommit=True,
-            connection_timeout=10
-        )
-        return conn
-    except mysql.connector.Error as err:
-        log(f"[ERROR] Error MySQL: {err}")
-        return None
-    except Exception as e:
-        log(f"[ERROR] Error general de conexión: {e}")
+    ca_path = "/etc/secrets/server-ca.pem"
+    if not os.path.exists(ca_path):
+        log_e(f"[DB] Certificado no encontrado en {ca_path}")
         return None
 
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            conn = mysql.connector.connect(
+                host=os.getenv("DB_HOST"),
+                user=os.getenv("DB_USER"),
+                password=os.getenv("DB_PASS"),
+                database=os.getenv("DB_NAME", "bdKaizen"),
+                port=int(os.getenv("DB_PORT", 3306)),
+                ssl_ca=ca_path,
+                ssl_verify_cert=True,
+                autocommit=True,
+                connection_timeout=8,
+            )
+            return conn
+        except mysql.connector.Error as err:
+            last_err = err
+            log_w(f"[DB] intento {attempt+1}/{retries+1} fallo: {err}")
+            time.sleep(delay)
+        except Exception as e:
+            last_err = e
+            log_w(f"[DB] intento {attempt+1}/{retries+1} fallo general: {e}")
+            time.sleep(delay)
+    log_e(f"[DB] No se pudo conectar (ultimo error): {last_err}")
+    return None
+
 # ============================================================
-# AUXILIARES
+# UTIL
 # ============================================================
-def download_image_from_drive(file_id):
+def download_image_from_drive(file_id: str):
     """
-    Descarga una imagen desde Google Drive y la devuelve como matriz OpenCV (BGR).
+    Descarga imagen desde Drive a matriz OpenCV (BGR).
     """
     try:
         url = f"https://drive.google.com/uc?id={file_id}"
-        dlog(f"[INFO] Descargando imagen desde: {url}")
-        response = requests.get(url, stream=True, timeout=10)
-        if response.status_code != 200:
-            log(f"[ERROR] No se pudo descargar la imagen (HTTP {response.status_code}) con file_id: {file_id}")
+        log_i(f"[DL] GET {url}")
+        resp = requests.get(url, stream=True, timeout=(5, 25))
+        if resp.status_code != 200:
+            log_e(f"[DL] HTTP {resp.status_code} al descargar file_id={file_id}")
             return None
-        image_array = np.asarray(bytearray(response.content), dtype=np.uint8)
-        return cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+        arr = np.asarray(bytearray(resp.content), dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        return img
     except Exception as e:
-        log(f"[ERROR] Error al descargar la imagen: {e}")
+        log_e(f"[DL] Error download file_id={file_id}: {e}")
         return None
 
-
-def compare_faces(image1_path, image2_path):
+def resize_max_dim(img: np.ndarray, max_dim: int = 720) -> np.ndarray:
     """
-    Compara dos imágenes de rostros y devuelve la distancia.
-    Lógica intacta: similarity = 1 - distance.
+    Reduce tamaño para bajar RAM/CPU manteniendo relación de aspecto.
     """
     try:
+        h, w = img.shape[:2]
+        m = max(h, w)
+        if m <= max_dim:
+            return img
+        scale = max_dim / float(m)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    except Exception:
+        return img
+
+def compare_faces(image1_path: str, image2_path: str) -> float:
+    """
+    Retorna distancia DeepFace (float). similarity = 1 - distance.
+    Usamos la API pública estable (sin 'model=').
+    """
+    try:
+        get_model()
         result = DeepFace.verify(
             image1_path,
             image2_path,
             model_name="Facenet",
-            detector_backend="opencv",  
+            detector_backend="opencv", 
             enforce_detection=False
         )
-        return result.get("distance", 1.0)
+        return float(result.get("distance", 1.0))
     except Exception as e:
-        log(f"[ERROR] Error al comparar rostros con DeepFace: {e}")
+        log_e(f"[DF] verify error: {e}")
         return 1.0
 
+def get_face_embedding(image_np: np.ndarray):
+    """
+    Retorna el embedding del primer rostro (lista de floats).
+    """
+    # Garantiza modelo cargado
+    get_model()
 
-def get_face_embedding(image_np):
-    """
-    Devuelve el embedding (vector facial) del primer rostro detectado.
-    """
     reps = DeepFace.represent(
-        img_path=image_np,            
+        img_path=image_np,               # DeepFace acepta ndarray
         model_name="Facenet",
-        detector_backend="opencv",     
+        detector_backend="opencv",       # Cambiar a "mtcnn" si preferís
         enforce_detection=True
     )
-    if isinstance(reps, list) and len(reps) > 0 and "embedding" in reps[0]:
+    if isinstance(reps, list) and reps and "embedding" in reps[0]:
         emb = reps[0]["embedding"]
         return [float(x) for x in emb]
-    raise ValueError("No se obtuvo embedding de la imagen.")
+    raise ValueError("No se obtuvo embedding.")
 
 # ============================================================
-# ENDPOINT 1: VALIDAR ROSTRO EN IMAGEN
+# ENDPOINTS
 # ============================================================
+@app.route("/healthz", methods=["GET"])
+def healthz():
+    return "ok", 200
+
 @app.route('/validate_face_from_drive', methods=['POST'])
 def validate_face_from_drive():
-    """
-    Verifica si una imagen contiene al menos un rostro válido.
-    """
+    req = rid()
     try:
-        log("\n[INFO] Nueva solicitud /validate_face_from_drive")
-        if VERBOSE:
-            dlog(f"[DATA RAW] {request.data}")
-
         data = request.get_json(force=True)
-        file_id = data.get('file_id')
-
+        file_id = (data or {}).get('file_id')
         if not file_id:
             return Response(json.dumps({"error": "Debe incluir file_id"}), mimetype="application/json", status=400)
+
+        log_i(f"[{req}] /validate_face_from_drive file_id={file_id}")
 
         image = download_image_from_drive(file_id)
         if image is None:
             return Response(json.dumps({"valid": False, "message": "No se pudo descargar la imagen"}), mimetype="application/json", status=400)
 
-        temp_path = f"/tmp/temp_validate_{uuid.uuid4()}.jpg"
-        cv2.imwrite(temp_path, image)
+        image = resize_max_dim(image, 720)
 
-        faces = DeepFace.extract_faces(
-            img_path=temp_path,
-            detector_backend="opencv", 
-            enforce_detection=True
-        )
+        tmp = f"/tmp/val_{req}.jpg"
+        cv2.imwrite(tmp, image, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
 
+        faces = []
         try:
-            os.remove(temp_path)
-        except Exception:
-            pass
+            faces = DeepFace.extract_faces(img_path=tmp, detector_backend="opencv", enforce_detection=True)
+        finally:
+            try: os.remove(tmp)
+            except: pass
 
-        if len(faces) > 0:
-            log("[RESULTADO] Rostro detectado ✅")
-            result = {"valid": True, "message": "La imagen contiene al menos un rostro válido."}
-        else:
-            log("[RESULTADO] Sin rostros detectados ❌")
-            result = {"valid": False, "message": "No se detectaron rostros en la imagen."}
-
+        ok = len(faces) > 0
+        log_i(f"[{req}] validate -> {'rostro ✅' if ok else 'sin rostro ❌'}")
         gc.collect()
-        return Response(json.dumps(result), mimetype="application/json", status=200)
+        return Response(json.dumps({"valid": ok}), mimetype="application/json", status=200)
 
     except Exception as e:
-        log(f"[ERROR] /validate_face_from_drive -> {e}")
+        log_e(f"[{req}] validate error: {e}")
         gc.collect()
         return Response(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
 
-# ============================================================
-# ENDPOINT 2: COMPARAR ROSTROS Y ACTUALIZAR BD
-# ============================================================
 @app.route('/compare_faces_from_drive', methods=['POST'])
 def compare_faces_from_drive():
-    """
-    Compara dos rostros y actualiza el score de similitud en la base de datos.
-    Devuelve SOLO {"similarity_score": <float>} para AppSheet.
-    """
+    req = rid()
     try:
-        log("\n[INFO] Nueva solicitud /compare_faces_from_drive")
-        if VERBOSE:
-            dlog(f"[HEADERS] {dict(request.headers)}")
-            dlog(f"[DATA RAW] {request.data}")
+        log_i(f"[{req}] Nueva solicitud /compare_faces_from_drive")
+        log_i(f"[{req}] [DATA RAW] {request.data}")
 
         data = request.get_json(force=True)
-        file_id1 = data.get('file_id1')
-        file_id2 = data.get('file_id2')
-        clock_id = data.get('clock_id')
+        file_id1 = (data or {}).get('file_id1')
+        file_id2 = (data or {}).get('file_id2')
+        clock_id = (data or {}).get('clock_id')
 
         if not file_id1 or not file_id2 or not clock_id:
             return Response(json.dumps({"error": "Faltan parámetros"}), mimetype="application/json", status=400)
 
-        image1 = download_image_from_drive(file_id1)
-        image2 = download_image_from_drive(file_id2)
-        if image1 is None or image2 is None:
+        img1 = download_image_from_drive(file_id1)
+        img2 = download_image_from_drive(file_id2)
+        if img1 is None or img2 is None:
             return Response(json.dumps({"error": "No se pudieron descargar las imágenes"}), mimetype="application/json", status=400)
 
-        req_id = str(uuid.uuid4())
-        temp1 = f"/tmp/temp_image1_{req_id}.jpg"
-        temp2 = f"/tmp/temp_image2_{req_id}.jpg"
-        cv2.imwrite(temp1, image1)
-        cv2.imwrite(temp2, image2)
+        # Reducir tamaño para bajar tiempo/RAM
+        img1 = resize_max_dim(img1, 720)
+        img2 = resize_max_dim(img2, 720)
 
-        distance = compare_faces(temp1, temp2)
-        similarity_score = round(1 - distance, 5)
+        t1 = f"/tmp/a_{req}.jpg"
+        t2 = f"/tmp/b_{req}.jpg"
+        cv2.imwrite(t1, img1, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        cv2.imwrite(t2, img2, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
 
-        if similarity_score >= 0.5:
-            log(f"[RESULTADO] Rostros similares ✅ | Score: {similarity_score}")
-        else:
-            log(f"[RESULTADO] Rostros diferentes ❌ | Score: {similarity_score}")
+        dist = compare_faces(t1, t2)
+        score = round(1 - dist, 5)
+        log_i(f"[{req}] RESULT -> {'similares ✅' if score >= 0.5 else 'diferentes ❌'} | score={score}")
 
-        # Actualización en BD
+        # Actualizar BD
         conn = get_db_connection()
         if conn:
             try:
-                cursor = conn.cursor()
-                update_query = """
-                    UPDATE rhClockV
-                    SET ckBiometrics = %s
-                    WHERE ClockID = %s;
-                """
-                dlog(f"[DB] UPDATE rhClockV SET ckBiometrics={similarity_score} WHERE ClockID={clock_id}")
-                cursor.execute(update_query, (similarity_score, clock_id))
+                cur = conn.cursor()
+                sql = "UPDATE rhClockV SET ckBiometrics = %s WHERE ClockID = %s"
+                cur.execute(sql, (score, clock_id))
                 conn.commit()
-                cursor.close()
-                conn.close()
-                log(f"[DB] ✅ ckBiometrics actualizado correctamente en ClockID={clock_id}")
+                log_i(f"[{req}] DB update OK (ClockID={clock_id})")
             except Exception as dbe:
-                log(f"[DB][ERROR] Falló el UPDATE: {dbe}")
+                log_e(f"[{req}] DB update error: {dbe}")
+            finally:
+                try: cur.close()
+                except: pass
+                try: conn.close()
+                except: pass
         else:
-            log("[WARN] No se pudo conectar a la base de datos")
+            log_w(f"[{req}] sin conexión a BD (se devolvió score igual)")
 
+        # Limpieza
         try:
-            os.remove(temp1); os.remove(temp2)
-        except Exception as e:
-            dlog(f"[WARN] No se pudo eliminar temporal: {e}")
-
+            os.remove(t1); os.remove(t2)
+        except: pass
+        del img1, img2
         gc.collect()
-        return Response(json.dumps({"similarity_score": similarity_score}), mimetype="application/json", status=200)
+
+        return Response(json.dumps({"similarity_score": score}), mimetype="application/json", status=200)
 
     except Exception as e:
-        log(f"[ERROR] /compare_faces_from_drive -> {e}")
+        log_e(f"[{req}] compare error: {e}")
         gc.collect()
         return Response(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
 
-# ============================================================
-# ENDPOINT 3: OBTENER EMBEDDING FACIAL
-# ============================================================
 @app.route('/face_embedding', methods=['POST'])
 def face_embedding():
-    """
-    Obtiene el embedding facial usando DeepFace (Facenet).
-    - JSON: {"file_id": "...", "staff_id": "..." (opcional)}
-    - Si trae staff_id, lo guarda en rhStaff.FaceEmbedding (JSON).
-    """
+    req = rid()
     try:
-        log("\n[INFO] Solicitud /face_embedding")
         data = request.get_json(force=True)
-
-        file_id = data.get("file_id")
-        staff_id = data.get("staff_id")
+        file_id = (data or {}).get("file_id")
+        staff_id = (data or {}).get("staff_id")
 
         if not file_id:
             return Response(json.dumps({"error": "Debe incluir file_id"}), mimetype="application/json", status=400)
 
-        image = download_image_from_drive(file_id)
-        if image is None:
+        log_i(f"[{req}] /face_embedding file_id={file_id} staff={staff_id or '-'}")
+
+        img = download_image_from_drive(file_id)
+        if img is None:
             return Response(json.dumps({"error": "No se pudo descargar la imagen"}), mimetype="application/json", status=400)
 
-        embedding = get_face_embedding(image)
-        dlog(f"[OK] Embedding generado. Dim={len(embedding)}")
+        img = resize_max_dim(img, 720)
+
+        emb = get_face_embedding(img)
+        log_i(f"[{req}] embedding OK dim={len(emb)}")
 
         if staff_id:
             conn = get_db_connection()
             if conn:
                 try:
-                    cursor = conn.cursor()
-                    emb_json = json.dumps(embedding, ensure_ascii=False)
-                    sql = "UPDATE rhStaff SET FaceEmbedding = %s WHERE StaffID = %s"
-                    dlog(f"[DB] Guardando embedding para StaffID={staff_id}")
-                    cursor.execute(sql, (emb_json, staff_id))
+                    cur = conn.cursor()
+                    emb_json = json.dumps(emb, ensure_ascii=False)
+                    cur.execute("UPDATE rhStaff SET FaceEmbedding = %s WHERE StaffID = %s", (emb_json, staff_id))
                     conn.commit()
-                    cursor.close()
-                    conn.close()
-                    log(f"[DB] ✅ FaceEmbedding actualizado")
+                    log_i(f"[{req}] DB FaceEmbedding OK (StaffID={staff_id})")
                 except Exception as dbe:
-                    log(f"[DB][ERROR] No se pudo guardar FaceEmbedding: {dbe}")
+                    log_e(f"[{req}] DB FaceEmbedding error: {dbe}")
+                finally:
+                    try: cur.close()
+                    except: pass
+                    try: conn.close()
+                    except: pass
 
         gc.collect()
-        return Response(json.dumps({"embedding": embedding}), mimetype="application/json", status=200)
+        return Response(json.dumps({"embedding": emb}), mimetype="application/json", status=200)
 
     except Exception as e:
-        log(f"[ERROR] /face_embedding -> {e}")
+        log_e(f"[{req}] embedding error: {e}")
         gc.collect()
         return Response(json.dumps({"error": str(e)}), mimetype="application/json", status=500)
 
 # ============================================================
-# EJECUCIÓN DEL SERVIDOR
+# RUN
 # ============================================================
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 5000))
-    log(f"[INFO] Iniciando servidor en puerto {port}")
+    log_i(f"[INFO] Iniciando servidor en puerto {port}")
     app.run(threaded=True, debug=True, host='0.0.0.0', port=port)
