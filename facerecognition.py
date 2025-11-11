@@ -119,18 +119,19 @@ def get_db_connection(retries: int = 3, delay: float = 0.4):
     jlog("error", evt="db.conn.get", ok=False, reason=last_err)
     return None
 
-def persist_score(clock_id: str, score: float) -> bool:
+def persist_score(clock_id: str, score):
     try:
         conn = get_db_connection()
+        score_log = None if score is None else round(float(score), 5)
         if not conn:
-            jlog("warning", evt="db.update.ckBiometrics", ok=False, reason="no_db_conn", clock_id=clock_id, score=round(float(score),5), req_id=g.req_id)
+            jlog("warning", evt="db.update.ckBiometrics", ok=False, reason="no_db_conn", clock_id=clock_id, score=score_log, req_id=g.req_id)
             return False
         try:
             cur = conn.cursor()
             cur.execute("UPDATE rhClockV SET ckBiometrics = %s WHERE ClockID = %s;", (score, clock_id))
             conn.commit()
             ok = cur.rowcount >= 1
-            jlog("info", evt="db.update.ckBiometrics", ok=ok, rows=cur.rowcount, clock_id=clock_id, score=round(float(score),5), req_id=g.req_id)
+            jlog("info", evt="db.update.ckBiometrics", ok=ok, rows=cur.rowcount, clock_id=clock_id, score=score_log, req_id=g.req_id)
             return ok
         finally:
             try: cur.close()
@@ -138,7 +139,7 @@ def persist_score(clock_id: str, score: float) -> bool:
             try: conn.close()
             except Exception: pass
     except Exception as e:
-        jlog("warning", evt="db.update.ckBiometrics", ok=False, reason=str(e), clock_id=clock_id, score=round(float(score),5), req_id=g.req_id)
+        jlog("warning", evt="db.update.ckBiometrics", ok=False, reason=str(e), clock_id=clock_id, score=score_log, req_id=g.req_id)
         return False
 
 _RS = requests.Session()
@@ -258,15 +259,15 @@ def compare_faces_from_drive():
         clock_id = data.get('clock_id')
         jlog("info", evt="compare.start", req_id=req_id, file_id1=bool(file_id1), file_id2=bool(file_id2), clock_id=clock_id)
         if not file_id1 or not file_id2 or not clock_id:
-            saved = persist_score(clock_id, 0.0) if clock_id else False
-            jlog("info", evt="compare.end", req_id=req_id, similarity=0.0, db_saved=bool(saved), reason="missing_params", elapsed_ms=elapsed_ms())
-            return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "reason": "missing_params"}), mimetype="application/json", status=200)
+            saved = persist_score(clock_id, None) if clock_id else False
+            jlog("info", evt="compare.end", req_id=req_id, similarity=None, db_saved=bool(saved), reason="missing_params", elapsed_ms=elapsed_ms())
+            return Response(json.dumps({"similarity_score": None, "db_saved": bool(saved), "reason": "missing_params"}), mimetype="application/json", status=200)
         img1 = download_image_from_drive(file_id1)
         img2 = download_image_from_drive(file_id2)
         if img1 is None or img2 is None:
-            saved = persist_score(clock_id, 0.0)
-            jlog("info", evt="compare.end", req_id=req_id, similarity=0.0, db_saved=bool(saved), reason="download_failed", elapsed_ms=elapsed_ms())
-            return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "reason": "download_failed"}), mimetype="application/json", status=200)
+            saved = persist_score(clock_id, None)
+            jlog("info", evt="compare.end", req_id=req_id, similarity=None, db_saved=bool(saved), reason="download_failed", elapsed_ms=elapsed_ms())
+            return Response(json.dumps({"similarity_score": None, "db_saved": bool(saved), "reason": "download_failed"}), mimetype="application/json", status=200)
         img1 = resize_max_dim(img1, 720)
         img2 = resize_max_dim(img2, 720)
         tmp1 = f"/tmp/df_{req_id}_1.jpg"
@@ -290,9 +291,9 @@ def compare_faces_from_drive():
             jlog("info", evt="compare.end", req_id=req_id, similarity=round(similarity,5), db_saved=bool(saved), reason="ok", elapsed_ms=elapsed_ms())
             return Response(json.dumps({"similarity_score": round(similarity, 5), "db_saved": bool(saved)}), mimetype="application/json", status=200)
         except Exception as e:
-            saved = persist_score(clock_id, 0.0)
-            jlog("warning", evt="compare.end", req_id=req_id, similarity=0.0, db_saved=bool(saved), reason="df_error", err=str(e), elapsed_ms=elapsed_ms())
-            return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "reason": "df_error"}), mimetype="application/json", status=200)
+            saved = persist_score(clock_id, None)
+            jlog("warning", evt="compare.end", req_id=req_id, similarity=None, db_saved=bool(saved), reason="df_error", err=str(e), elapsed_ms=elapsed_ms())
+            return Response(json.dumps({"similarity_score": None, "db_saved": bool(saved), "reason": "df_error"}), mimetype="application/json", status=200)
         finally:
             for p in (tmp1, tmp2):
                 try: os.remove(p)
@@ -302,11 +303,11 @@ def compare_faces_from_drive():
             data = request.get_json(silent=True) or {}
             clock_id = data.get('clock_id')
             if clock_id:
-                persist_score(clock_id, 0.0)
+                persist_score(clock_id, None)
         except Exception:
             pass
-        jlog("error", evt="compare.end", req_id=req_id, similarity=0.0, db_saved=False, reason="server_exception", err=str(e), elapsed_ms=elapsed_ms())
-        return Response(json.dumps({"similarity_score": 0.0, "db_saved": False, "reason": "server_exception"}), mimetype="application/json", status=200)
+        jlog("error", evt="compare.end", req_id=req_id, similarity=None, db_saved=False, reason="server_exception", err=str(e), elapsed_ms=elapsed_ms())
+        return Response(json.dumps({"similarity_score": None, "db_saved": False, "reason": "server_exception"}), mimetype="application/json", status=200)
 
 @app.route('/face_embedding', methods=['POST'])
 def face_embedding():
@@ -373,8 +374,8 @@ def face_validation():
              has_ckImage=bool(ck_image))
 
         if not staff_id or not clock_id:
-            jlog("info", evt="face_validation.end", req_id=g.req_id, clock_id=clock_id, staff_id=staff_id, similarity=0.0, db_saved=False, updated_staff_embedding=False, reason="missing_ids", elapsed_ms=elapsed_ms())
-            return Response(json.dumps({"similarity_score": 0.0, "db_saved": False, "updated_staff_embedding": False, "reason": "missing_ids"}), mimetype="application/json", status=200)
+            jlog("info", evt="face_validation.end", req_id=g.req_id, clock_id=clock_id, staff_id=staff_id, similarity=None, db_saved=False, updated_staff_embedding=False, reason="missing_ids", elapsed_ms=elapsed_ms())
+            return Response(json.dumps({"similarity_score": None, "db_saved": False, "updated_staff_embedding": False, "reason": "missing_ids"}), mimetype="application/json", status=200)
 
         staff_emb = None
         updated_staff = False
@@ -385,21 +386,21 @@ def face_validation():
                 jlog("warning", evt="face_validation.staff_embedding_parse", ok=False, req_id=g.req_id)
         else:
             if not st_image:
-                saved = persist_score(clock_id, 0.0)
-                jlog("info", evt="face_validation.end", req_id=g.req_id, clock_id=clock_id, staff_id=staff_id, similarity=0.0, db_saved=bool(saved), updated_staff_embedding=False, reason="missing_stImage", elapsed_ms=elapsed_ms())
-                return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "updated_staff_embedding": False, "reason": "missing_stImage"}), mimetype="application/json", status=200)
+                saved = persist_score(clock_id, None)
+                jlog("info", evt="face_validation.end", req_id=g.req_id, clock_id=clock_id, staff_id=staff_id, similarity=None, db_saved=bool(saved), updated_staff_embedding=False, reason="missing_stImage", elapsed_ms=elapsed_ms())
+                return Response(json.dumps({"similarity_score": None, "db_saved": bool(saved), "updated_staff_embedding": False, "reason": "missing_stImage"}), mimetype="application/json", status=200)
             img_staff = download_image_from_drive(st_image)
             if img_staff is None:
-                saved = persist_score(clock_id, 0.0)
-                jlog("info", evt="face_validation.end", req_id=g.req_id, clock_id=clock_id, staff_id=staff_id, similarity=0.0, db_saved=bool(saved), updated_staff_embedding=False, reason="download_stImage_failed", elapsed_ms=elapsed_ms())
-                return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "updated_staff_embedding": False, "reason": "download_stImage_failed"}), mimetype="application/json", status=200)
+                saved = persist_score(clock_id, None)
+                jlog("info", evt="face_validation.end", req_id=g.req_id, clock_id=clock_id, staff_id=staff_id, similarity=None, db_saved=bool(saved), updated_staff_embedding=False, reason="download_stImage_failed", elapsed_ms=elapsed_ms())
+                return Response(json.dumps({"similarity_score": None, "db_saved": bool(saved), "updated_staff_embedding": False, "reason": "download_stImage_failed"}), mimetype="application/json", status=200)
             img_staff = resize_max_dim(img_staff, 720)
             try:
                 staff_emb = get_face_embedding(img_staff)
             except Exception as e:
-                saved = persist_score(clock_id, 0.0)
-                jlog("info", evt="face_validation.end", req_id=g.req_id, clock_id=clock_id, staff_id=staff_id, similarity=0.0, db_saved=bool(saved), updated_staff_embedding=False, reason="stImage_no_face", err=str(e), elapsed_ms=elapsed_ms())
-                return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "updated_staff_embedding": False, "reason": "stImage_no_face"}), mimetype="application/json", status=200)
+                saved = persist_score(clock_id, None)
+                jlog("info", evt="face_validation.end", req_id=g.req_id, clock_id=clock_id, staff_id=staff_id, similarity=None, db_saved=bool(saved), updated_staff_embedding=False, reason="stImage_no_face", err=str(e), elapsed_ms=elapsed_ms())
+                return Response(json.dumps({"similarity_score": None, "db_saved": bool(saved), "updated_staff_embedding": False, "reason": "stImage_no_face"}), mimetype="application/json", status=200)
 
             conn = get_db_connection()
             if conn:
@@ -418,23 +419,23 @@ def face_validation():
                     except: pass
 
         if not ck_image:
-            saved = persist_score(clock_id, 0.0)
-            jlog("info", evt="face_validation.end", req_id=g.req_id, clock_id=clock_id, staff_id=staff_id, similarity=0.0, db_saved=bool(saved), updated_staff_embedding=bool(updated_staff), reason="missing_ckImage", elapsed_ms=elapsed_ms())
-            return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "updated_staff_embedding": bool(updated_staff), "reason": "missing_ckImage"}), mimetype="application/json", status=200)
+            saved = persist_score(clock_id, None)
+            jlog("info", evt="face_validation.end", req_id=g.req_id, clock_id=clock_id, staff_id=staff_id, similarity=None, db_saved=bool(saved), updated_staff_embedding=bool(updated_staff), reason="missing_ckImage", elapsed_ms=elapsed_ms())
+            return Response(json.dumps({"similarity_score": None, "db_saved": bool(saved), "updated_staff_embedding": bool(updated_staff), "reason": "missing_ckImage"}), mimetype="application/json", status=200)
 
         img_mark = download_image_from_drive(ck_image)
         if img_mark is None:
-            saved = persist_score(clock_id, 0.0)
-            jlog("info", evt="face_validation.end", req_id=g.req_id, clock_id=clock_id, staff_id=staff_id, similarity=0.0, db_saved=bool(saved), updated_staff_embedding=bool(updated_staff), reason="download_ckImage_failed", elapsed_ms=elapsed_ms())
-            return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "updated_staff_embedding": bool(updated_staff), "reason": "download_ckImage_failed"}), mimetype="application/json", status=200)
+            saved = persist_score(clock_id, None)
+            jlog("info", evt="face_validation.end", req_id=g.req_id, clock_id=clock_id, staff_id=staff_id, similarity=None, db_saved=bool(saved), updated_staff_embedding=bool(updated_staff), reason="download_ckImage_failed", elapsed_ms=elapsed_ms())
+            return Response(json.dumps({"similarity_score": None, "db_saved": bool(saved), "updated_staff_embedding": bool(updated_staff), "reason": "download_ckImage_failed"}), mimetype="application/json", status=200)
 
         img_mark = resize_max_dim(img_mark, 720)
         try:
             mark_emb = get_face_embedding(img_mark)
         except Exception as e:
-            saved = persist_score(clock_id, 0.0)
-            jlog("info", evt="face_validation.end", req_id=g.req_id, clock_id=clock_id, staff_id=staff_id, similarity=0.0, db_saved=bool(saved), updated_staff_embedding=bool(updated_staff), reason="ckImage_no_face", err=str(e), elapsed_ms=elapsed_ms())
-            return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "updated_staff_embedding": bool(updated_staff), "reason": "ckImage_no_face"}), mimetype="application/json", status=200)
+            saved = persist_score(clock_id, None)
+            jlog("info", evt="face_validation.end", req_id=g.req_id, clock_id=clock_id, staff_id=staff_id, similarity=None, db_saved=bool(saved), updated_staff_embedding=bool(updated_staff), reason="ckImage_no_face", err=str(e), elapsed_ms=elapsed_ms())
+            return Response(json.dumps({"similarity_score": None, "db_saved": bool(saved), "updated_staff_embedding": bool(updated_staff), "reason": "ckImage_no_face"}), mimetype="application/json", status=200)
 
         sim = cosine_similarity(staff_emb, mark_emb)
         sim = max(0.0, min(1.0, float(sim)))
@@ -463,11 +464,11 @@ def face_validation():
             data = request.get_json(silent=True) or {}
             clock_id = data.get('clock_id')
             if clock_id:
-                persist_score(clock_id, 0.0)
+                persist_score(clock_id, None)
         except Exception:
             pass
-        jlog("error", evt="face_validation.end", req_id=g.req_id, similarity=0.0, db_saved=False, updated_staff_embedding=False, reason="server_exception", err=str(e), elapsed_ms=elapsed_ms())
-        return Response(json.dumps({"similarity_score": 0.0, "db_saved": False, "updated_staff_embedding": False, "reason": "server_exception"}), mimetype="application/json", status=200)
+        jlog("error", evt="face_validation.end", req_id=g.req_id, similarity=None, db_saved=False, updated_staff_embedding=False, reason="server_exception", err=str(e), elapsed_ms=elapsed_ms())
+        return Response(json.dumps({"similarity_score": None, "db_saved": False, "updated_staff_embedding": False, "reason": "server_exception"}), mimetype="application/json", status=200)
 
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 5000))
