@@ -336,121 +336,97 @@ def face_embedding():
 
 @app.route('/face_validation', methods=['POST'])
 def face_validation():
-    req = rid()
     try:
         data = request.get_json(force=True) or {}
         staff_id = data.get("staff_id")
         clock_id = data.get("clock_id")
-        staff_embedding_body = data.get("staff_embedding")
-        embedding_mark = data.get("embedding_mark")
-        file_id_mark = data.get("file_id") or data.get("mark_file_id")
-        staff_file_id = data.get("staff_file_id") or data.get("file_id_staff")
+        st_image = data.get("stImage")
+        ck_image = data.get("ckImage")
 
-        if not clock_id:
-            return Response(json.dumps({"similarity_score": 0.0, "db_saved": False, "updated_staff_embedding": False, "reason": "missing_clock_id"}), mimetype="application/json", status=200)
+        if not staff_id or not clock_id:
+            return Response(json.dumps({"similarity_score": 0.0, "db_saved": False, "updated_staff_embedding": False, "reason": "missing_ids"}), mimetype="application/json", status=200)
 
         staff_emb = None
-        source_staff = None
         updated_staff = False
 
-        if staff_embedding_body:
-            staff_emb = _embedding_from_json(staff_embedding_body)
-            source_staff = "body"
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT FaceEmbedding FROM rhStaff WHERE StaffID = %s", (staff_id,))
+                row = cur.fetchone()
+                if row and row[0]:
+                    try:
+                        staff_emb = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+                    except Exception:
+                        staff_emb = None
+            finally:
+                try:
+                    cur.close()
+                except:
+                    pass
+                try:
+                    conn.close()
+                except:
+                    pass
 
-        if staff_emb is None and staff_id:
-            cached = _staff_cache_get(staff_id)
-            if cached is not None:
-                staff_emb = cached
-                source_staff = "cache"
+        if not staff_emb:
+            if not st_image:
+                saved = persist_score(clock_id, 0.0)
+                return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "updated_staff_embedding": False, "reason": "missing_stImage"}), mimetype="application/json", status=200)
+            img_staff = download_image_from_drive(st_image)
+            if img_staff is None:
+                saved = persist_score(clock_id, 0.0)
+                return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "updated_staff_embedding": False, "reason": "download_stImage_failed"}), mimetype="application/json", status=200)
+            img_staff = resize_max_dim(img_staff, 720)
+            try:
+                staff_emb = get_face_embedding(img_staff)
+            except Exception:
+                saved = persist_score(clock_id, 0.0)
+                return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "updated_staff_embedding": False, "reason": "stImage_no_face"}), mimetype="application/json", status=200)
 
-        if staff_emb is None and staff_id:
             conn = get_db_connection()
             if conn:
                 try:
                     cur = conn.cursor()
-                    cur.execute("SELECT FaceEmbedding FROM rhStaff WHERE StaffID = %s", (staff_id,))
-                    row = cur.fetchone()
-                    if row and row[0]:
-                        staff_emb = _embedding_from_json(row[0])
-                        if staff_emb:
-                            _staff_cache_put(staff_id, staff_emb)
-                            source_staff = "db"
-                except Exception:
-                    pass
+                    cur.execute("UPDATE rhStaff SET FaceEmbedding = %s WHERE StaffID = %s", (json.dumps(staff_emb, ensure_ascii=False), staff_id))
+                    conn.commit()
+                    updated_staff = (cur.rowcount >= 1)
                 finally:
-                    try: cur.close()
-                    except: pass
-                    try: conn.close()
-                    except: pass
+                    try:
+                        cur.close()
+                    except:
+                        pass
+                    try:
+                        conn.close()
+                    except:
+                        pass
 
-        if staff_emb is None and staff_file_id:
-            img_staff = download_image_from_drive(staff_file_id)
-            if img_staff is not None:
-                img_staff = resize_max_dim(img_staff, 720)
-                try:
-                    staff_emb = get_face_embedding(img_staff)
-                    source_staff = "built"
-                    if staff_id:
-                        conn = get_db_connection()
-                        if conn:
-                            try:
-                                cur = conn.cursor()
-                                emb_json = json.dumps(staff_emb, ensure_ascii=False)
-                                cur.execute("UPDATE rhStaff SET FaceEmbedding = %s WHERE StaffID = %s", (emb_json, staff_id))
-                                conn.commit()
-                                updated_staff = (cur.rowcount >= 1)
-                                _staff_cache_put(staff_id, staff_emb)
-                            except Exception:
-                                pass
-                            finally:
-                                try: cur.close()
-                                except: pass
-                                try: conn.close()
-                                except: pass
-                except Exception:
-                    staff_emb = None
-
-        if staff_emb is None:
+        if not ck_image:
             saved = persist_score(clock_id, 0.0)
-            return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "updated_staff_embedding": False, "reason": "missing_staff_embedding"}), mimetype="application/json", status=200)
+            return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "updated_staff_embedding": bool(updated_staff), "reason": "missing_ckImage"}), mimetype="application/json", status=200)
 
-        mark_emb = None
-        source_mark = None
-        if embedding_mark:
-            mark_emb = _embedding_from_json(embedding_mark)
-            source_mark = "body"
-        elif file_id_mark:
-            img = download_image_from_drive(file_id_mark)
-            if img is None:
-                saved = persist_score(clock_id, 0.0)
-                return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "updated_staff_embedding": bool(updated_staff), "reason": "download_failed"}), mimetype="application/json", status=200)
-            img = resize_max_dim(img, 720)
-            try:
-                mark_emb = get_face_embedding(img)
-                source_mark = "image"
-            except Exception:
-                saved = persist_score(clock_id, 0.0)
-                return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "updated_staff_embedding": bool(updated_staff), "reason": "no_face_or_df_error"}), mimetype="application/json", status=200)
-        else:
+        img_mark = download_image_from_drive(ck_image)
+        if img_mark is None:
             saved = persist_score(clock_id, 0.0)
-            return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "updated_staff_embedding": bool(updated_staff), "reason": "missing_mark"}), mimetype="application/json", status=200)
+            return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "updated_staff_embedding": bool(updated_staff), "reason": "download_ckImage_failed"}), mimetype="application/json", status=200)
 
-        if not isinstance(staff_emb, list) or not isinstance(mark_emb, list) or not staff_emb or not mark_emb:
+        img_mark = resize_max_dim(img_mark, 720)
+        try:
+            mark_emb = get_face_embedding(img_mark)
+        except Exception:
             saved = persist_score(clock_id, 0.0)
-            return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "updated_staff_embedding": bool(updated_staff), "reason": "invalid_embeddings"}), mimetype="application/json", status=200)
+            return Response(json.dumps({"similarity_score": 0.0, "db_saved": bool(saved), "updated_staff_embedding": bool(updated_staff), "reason": "ckImage_no_face"}), mimetype="application/json", status=200)
 
-        sim = cosine_similarity(staff_emb, mark_emb)
-        if sim < 0.0: sim = 0.0
-        if sim > 1.0: sim = 1.0
+        va = np.asarray(staff_emb, dtype=np.float32)
+        vb = np.asarray(mark_emb, dtype=np.float32)
+        na = np.linalg.norm(va)
+        nb = np.linalg.norm(vb)
+        sim = float(np.dot(va, vb) / (na * nb)) if na != 0 and nb != 0 else 0.0
+        sim = 0.0 if sim < 0.0 else (1.0 if sim > 1.0 else sim)
 
         saved = persist_score(clock_id, sim)
-        gc.collect()
-        return Response(json.dumps({
-            "similarity_score": round(float(sim), 5),
-            "db_saved": bool(saved),
-            "updated_staff_embedding": bool(updated_staff),
-            "used": {"staff": source_staff, "mark": source_mark}
-        }), mimetype="application/json", status=200)
+        return Response(json.dumps({"similarity_score": round(sim, 5), "db_saved": bool(saved), "updated_staff_embedding": bool(updated_staff)}), mimetype="application/json", status=200)
 
     except Exception:
         try:
@@ -460,7 +436,6 @@ def face_validation():
                 persist_score(clock_id, 0.0)
         except Exception:
             pass
-        gc.collect()
         return Response(json.dumps({"similarity_score": 0.0, "db_saved": False, "updated_staff_embedding": False, "reason": "server_exception"}), mimetype="application/json", status=200)
 
 if __name__ == '__main__':
