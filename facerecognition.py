@@ -23,6 +23,8 @@ import gc
 import sys
 from threading import Lock, Semaphore
 import random
+import re
+from urllib.parse import urlparse, parse_qs
 
 try:
     from absl import logging as absl_logging
@@ -67,6 +69,8 @@ def elapsed_ms():
 _MODEL_CACHE = {"facenet": None}
 _MODEL_LOCK = Lock()
 _INFER_SEM = Semaphore(int(os.getenv("MAX_INFER_CONCURRENCY", "2")))
+DETECTORS = [x.strip() for x in os.getenv("DETECTOR_BACKENDS", "retinaface,mediapipe,mtcnn,opencv").split(",") if x.strip()]
+_DRIVE_ID_RE = re.compile(r'^[A-Za-z0-9_-]{20,}$')
 
 def get_model():
     with _MODEL_LOCK:
@@ -148,24 +152,49 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 _RS.mount("https://", HTTPAdapter(max_retries=Retry(total=3, backoff_factor=0.2, status_forcelist=(429, 500, 502, 503, 504))))
 
-def download_image_from_drive(file_id: str):
+def extract_drive_id(val: str):
+    if not val:
+        return None
+    if _DRIVE_ID_RE.match(val):
+        return val
     try:
-        url = f"https://drive.google.com/uc?id={file_id}"
+        u = urlparse(val)
+        if 'drive.google.com' in u.netloc:
+            qs = parse_qs(u.query)
+            if 'id' in qs and qs['id']:
+                return qs['id'][0]
+            parts = [p for p in u.path.split('/') if p]
+            if 'file' in parts and 'd' in parts:
+                i = parts.index('d') + 1
+                if i < len(parts):
+                    return parts[i]
+    except Exception:
+        pass
+    return None
+
+def download_image_from_drive(file_id_or_url: str):
+    try:
+        fid = extract_drive_id(file_id_or_url)
+        if not fid:
+            jlog("warning", evt="drive.extract_id", ok=False, val=str(file_id_or_url)[:64], req_id=g.req_id)
+            return None
+        url = f"https://drive.google.com/uc?export=download&id={fid}"
         resp = _RS.get(url, stream=True, timeout=(5, 25))
         if resp.status_code != 200:
-            jlog("warning", evt="drive.download", ok=False, status=resp.status_code, file_id=file_id, req_id=g.req_id)
+            jlog("warning", evt="drive.download", ok=False, status=resp.status_code, file_id=fid[:10], req_id=g.req_id)
+            return None
+        data = resp.content
+        arr = np.asarray(bytearray(data), dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            jlog("warning", evt="drive.decode", ok=False, file_id=fid[:10], req_id=g.req_id)
             return None
         ctype = resp.headers.get("Content-Type", "")
         if "image" not in ctype:
-            jlog("warning", evt="drive.download", ok=False, reason="not_image", content_type=ctype, file_id=file_id, req_id=g.req_id)
-            return None
-        arr = np.asarray(bytearray(resp.content), dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if img is None:
-            jlog("warning", evt="drive.decode", ok=False, file_id=file_id, req_id=g.req_id)
+            jlog("info", evt="drive.content_type", note="non_image_header_but_decoded_ok", content_type=ctype, file_id=fid[:10], req_id=g.req_id)
         return img
     except Exception as e:
-        jlog("warning", evt="drive.download", ok=False, reason=str(e), file_id=file_id, req_id=g.req_id)
+        jlog("warning", evt="drive.download", ok=False, reason=str(e), val=str(file_id_or_url)[:64], req_id=g.req_id)
         return None
 
 def resize_max_dim(img: np.ndarray, max_dim: int = 720) -> np.ndarray:
@@ -183,17 +212,25 @@ def resize_max_dim(img: np.ndarray, max_dim: int = 720) -> np.ndarray:
 
 def get_face_embedding(image_np: np.ndarray):
     get_model()
-    with _INFER_SEM:
-        reps = DeepFace.represent(
-            img_path=image_np,
-            model_name="Facenet",
-            detector_backend="opencv",
-            enforce_detection=True
-        )
-    if isinstance(reps, list) and reps and "embedding" in reps[0]:
-        emb = reps[0]["embedding"]
-        return [float(x) for x in emb]
-    raise ValueError("no_embedding")
+    last_err = None
+    for det in DETECTORS:
+        try:
+            with _INFER_SEM:
+                reps = DeepFace.represent(
+                    img_path=image_np,
+                    model_name="Facenet",
+                    detector_backend=det,
+                    enforce_detection=True
+                )
+            if isinstance(reps, list) and reps and "embedding" in reps[0]:
+                jlog("info", evt="face.detect", ok=True, backend=det, req_id=g.req_id)
+                emb = reps[0]["embedding"]
+                return [float(x) for x in emb]
+        except Exception as e:
+            last_err = str(e)
+            jlog("warning", evt="face.detect", ok=False, backend=det, reason=last_err[:160], req_id=g.req_id)
+            continue
+    raise ValueError("no_face_detected")
 
 def _embedding_from_json(val):
     try:
@@ -210,16 +247,30 @@ def cosine_similarity(a, b):
     try:
         va = np.asarray(a, dtype=np.float32)
         vb = np.asarray(b, dtype=np.float32)
+        if va.size == 0 or vb.size == 0 or va.shape != vb.shape:
+            return None
         na = np.linalg.norm(va)
         nb = np.linalg.norm(vb)
         if na == 0 or nb == 0:
-            return 0.0
+            return None
         sim = float(np.dot(va, vb) / (na * nb))
         if sim < 0.0: sim = 0.0
         if sim > 1.0: sim = 1.0
         return sim
     except Exception:
-        return 0.0
+        return None
+
+def _has_face(image_np: np.ndarray) -> bool:
+    get_model()
+    for det in DETECTORS:
+        try:
+            faces = DeepFace.extract_faces(img_path=image_np, detector_backend=det, enforce_detection=True)
+            if isinstance(faces, list) and len(faces) > 0:
+                jlog("info", evt="face.extract", ok=True, backend=det, n=len(faces), req_id=g.req_id)
+                return True
+        except Exception as e:
+            jlog("warning", evt="face.extract", ok=False, backend=det, reason=str(e)[:160], req_id=g.req_id)
+    return False
 
 @app.route("/healthz", methods=["GET"])
 def healthz():
@@ -230,7 +281,7 @@ def validate_face_from_drive():
     try:
         data = request.get_json(force=True)
         file_id = (data or {}).get('file_id')
-        jlog("info", evt="validate_face_from_drive.start", req_id=g.req_id, file_id=file_id)
+        jlog("info", evt="validate_face_from_drive.start", req_id=g.req_id, file_id=bool(file_id))
         if not file_id:
             jlog("info", evt="validate_face_from_drive.end", req_id=g.req_id, valid=False, reason="missing_file_id", elapsed_ms=elapsed_ms())
             return Response(json.dumps({"valid": False, "reason": "missing_file_id"}), mimetype="application/json", status=200)
@@ -239,8 +290,7 @@ def validate_face_from_drive():
             jlog("info", evt="validate_face_from_drive.end", req_id=g.req_id, valid=False, reason="download_failed", elapsed_ms=elapsed_ms())
             return Response(json.dumps({"valid": False, "reason": "download_failed"}), mimetype="application/json", status=200)
         image = resize_max_dim(image, 720)
-        faces = DeepFace.extract_faces(img_path=image, detector_backend="opencv", enforce_detection=False)
-        ok = len(faces) > 0
+        ok = _has_face(image)
         gc.collect()
         jlog("info", evt="validate_face_from_drive.end", req_id=g.req_id, valid=bool(ok), elapsed_ms=elapsed_ms())
         return Response(json.dumps({"valid": ok}), mimetype="application/json", status=200)
@@ -276,13 +326,14 @@ def compare_faces_from_drive():
         cv2.imwrite(tmp2, img2)
         try:
             get_model()
+            det = DETECTORS[0] if DETECTORS else "retinaface"
             with _INFER_SEM:
                 result = DeepFace.verify(
                     img1_path=tmp1,
                     img2_path=tmp2,
                     model_name="Facenet",
-                    detector_backend="opencv",
-                    enforce_detection=False
+                    detector_backend=det,
+                    enforce_detection=True
                 )
             distance = float(result.get("distance", 1.0))
             similarity = 1.0 - distance
@@ -438,6 +489,11 @@ def face_validation():
             return Response(json.dumps({"similarity_score": None, "db_saved": bool(saved), "updated_staff_embedding": bool(updated_staff), "reason": "ckImage_no_face"}), mimetype="application/json", status=200)
 
         sim = cosine_similarity(staff_emb, mark_emb)
+        if sim is None:
+            saved = persist_score(clock_id, None)
+            jlog("info", evt="face_validation.end", req_id=g.req_id, clock_id=clock_id, staff_id=staff_id, similarity=None, db_saved=bool(saved), updated_staff_embedding=bool(updated_staff), reason="invalid_embeddings", elapsed_ms=elapsed_ms())
+            return Response(json.dumps({"similarity_score": None, "db_saved": bool(saved), "updated_staff_embedding": bool(updated_staff), "reason": "invalid_embeddings"}), mimetype="application/json", status=200)
+
         sim = max(0.0, min(1.0, float(sim)))
         saved = persist_score(clock_id, sim)
         gc.collect()
