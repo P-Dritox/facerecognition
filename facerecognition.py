@@ -8,7 +8,7 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
 os.environ["TF_NUM_INTEROP_THREADS"] = "1"
 
-from flask import Flask, request, Response, g
+from flask import Flask, request, Response, g, jsonify
 from flask_cors import CORS
 import logging
 import uuid
@@ -25,6 +25,7 @@ from threading import Lock, Semaphore
 import random
 import re
 from urllib.parse import urlparse, parse_qs
+from .db_utils import get_all_staff_embeddings
 
 try:
     from absl import logging as absl_logging
@@ -525,6 +526,51 @@ def face_validation():
             pass
         jlog("error", evt="face_validation.end", req_id=g.req_id, similarity=None, db_saved=False, updated_staff_embedding=False, reason="server_exception", err=str(e), elapsed_ms=elapsed_ms())
         return Response(json.dumps({"similarity_score": None, "db_saved": False, "updated_staff_embedding": False, "reason": "server_exception"}), mimetype="application/json", status=200)
+
+@app.route('/identify_staff_from_image', methods=['POST'])
+def identify_staff_from_image():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'no_file'}), 400
+
+        file = request.files['file']
+        file_bytes = np.frombuffer(file.read(), np.uint8)
+        img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+        if img is None:
+            return jsonify({'error': 'invalid_image'}), 400
+
+        embedding = DeepFace.represent(img_path=img, model_name='Facenet', enforce_detection=True)
+
+        staff_db = get_all_staff_embeddings()
+        best_match = None
+        best_score = 0.0
+        top_matches = []
+
+        for s in staff_db:
+            dist = np.linalg.norm(np.array(embedding) - np.array(s['embedding']))
+            score = 1 / (1 + dist)
+            top_matches.append({
+                'staff_id': s['id'],
+                'name': s['name'],
+                'similarity': float(score)
+            })
+            if score > best_score:
+                best_score = score
+                best_match = s
+
+        top_matches = sorted(top_matches, key=lambda x: x['similarity'], reverse=True)[:3]
+
+        return jsonify({
+            'best_match_staff_id': best_match['id'] if best_match else None,
+            'best_match_name': best_match['name'] if best_match else None,
+            'similarity_score': best_score,
+            'top_matches': top_matches
+        })
+
+    except Exception as e:
+        print('Error en /identify_staff_from_image:', e)
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 5000))
