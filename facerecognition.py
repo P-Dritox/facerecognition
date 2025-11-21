@@ -25,7 +25,7 @@ from threading import Lock, Semaphore
 import random
 import re
 from urllib.parse import urlparse, parse_qs
-from .db_utils import get_all_staff_embeddings
+import db_utils
 
 try:
     from absl import logging as absl_logging
