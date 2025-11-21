@@ -544,24 +544,38 @@ def identify_staff_from_image():
         if img is None:
             return jsonify({'error': 'invalid_image'}), 400
 
-        embedding = DeepFace.represent(img_path=img, model_name='Facenet', enforce_detection=True)
+        try:
+            embedding = get_face_embedding(img)
+        except ValueError:
+            return jsonify({'error': 'no_face_detected'}), 400
+        except Exception as e:
+            jlog("error", evt="face.embedding", ok=False, reason=str(e), req_id=g.req_id)
+            return jsonify({'error': 'embedding_failed'}), 500
 
-        staff_db = get_all_staff_embeddings()
+        staff_db = db_utils.get_all_staff_embeddings()
         best_match = None
         best_score = 0.0
         top_matches = []
 
+        probe = np.asarray(embedding, dtype=np.float32)
         for s in staff_db:
-            dist = np.linalg.norm(np.array(embedding) - np.array(s['embedding']))
-            score = 1 / (1 + dist)
-            top_matches.append({
-                'staff_id': s['id'],
-                'name': s['name'],
-                'similarity': float(score)
-            })
-            if score > best_score:
-                best_score = score
-                best_match = s
+            try:
+                candidate = np.asarray(s.get('embedding'), dtype=np.float32)
+                if candidate.shape != probe.shape or candidate.size == 0:
+                    continue
+                dist = np.linalg.norm(probe - candidate)
+                score = float(1 / (1 + dist))
+                top_matches.append({
+                    'staff_id': s['id'],
+                    'name': s['name'],
+                    'similarity': score
+                })
+                if score > best_score:
+                    best_score = score
+                    best_match = s
+            except Exception as err:
+                jlog("warning", evt="staff.compare", ok=False, staff_id=s.get('id'), reason=str(err)[:120], req_id=g.req_id)
+                continue
 
         top_matches = sorted(top_matches, key=lambda x: x['similarity'], reverse=True)[:3]
 
