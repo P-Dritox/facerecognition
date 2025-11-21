@@ -26,6 +26,10 @@ import random
 import re
 from urllib.parse import urlparse, parse_qs
 import db_utils
+...
+staff_db = db_utils.get_all_staff_embeddings()
+# Configure TensorFlow logging level
+
 
 try:
     from absl import logging as absl_logging
