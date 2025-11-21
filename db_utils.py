@@ -49,8 +49,12 @@ def get_all_staff_embeddings():
     try:
         cur = conn.cursor(dictionary=True)
         cur.execute("""
-            SELECT StaffID, CONCAT(StFirstName, ' ', StLastName) as name, FaceEmbedding 
-            FROM rhStaff 
+            SELECT StaffID,
+                   stName,
+                   stFirstsurname,
+                   stSecondsurname,
+                   FaceEmbedding
+            FROM rhStaff
             WHERE FaceEmbedding IS NOT NULL
         """)
         rows = cur.fetchall()
@@ -60,9 +64,15 @@ def get_all_staff_embeddings():
             try:
                 embedding = json.loads(row['FaceEmbedding']) if isinstance(row['FaceEmbedding'], str) else row['FaceEmbedding']
                 if embedding and isinstance(embedding, list):
+                    parts = [
+                        (row.get('stName') or '').strip(),
+                        (row.get('stFirstsurname') or '').strip(),
+                        (row.get('stSecondsurname') or '').strip()
+                    ]
+                    name = " ".join(p for p in parts if p)
                     staff_list.append({
                         'id': row['StaffID'],
-                        'name': row['name'],
+                        'name': name or str(row['StaffID']),
                         'embedding': embedding
                     })
             except Exception as e:
