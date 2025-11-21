@@ -553,6 +553,9 @@ def identify_staff_from_image():
             return jsonify({'error': 'embedding_failed'}), 500
 
         staff_db = db_utils.get_all_staff_embeddings()
+        if not staff_db:
+            jlog("warning", evt="staff.db.empty", req_id=g.req_id)
+            return jsonify({'error': 'no_staff_embeddings'}), 404
         best_match = None
         best_score = 0.0
         top_matches = []
@@ -587,6 +590,7 @@ def identify_staff_from_image():
         })
 
     except Exception as e:
+        jlog("error", evt="identify_staff_from_image", ok=False, reason=str(e), req_id=getattr(g, "req_id", None))
         print('Error en /identify_staff_from_image:', e)
         return jsonify({'error': str(e)}), 500
 

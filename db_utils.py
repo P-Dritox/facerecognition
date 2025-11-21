@@ -46,6 +46,7 @@ def get_all_staff_embeddings():
     if not conn:
         return []
     
+    cur = None
     try:
         cur = conn.cursor(dictionary=True)
         cur.execute("""
