@@ -23,6 +23,7 @@ def _init_dbpool():
         port=int(os.getenv("DB_PORT", 3306)),
         ssl_verify_cert=False,
         ssl_disabled=False,
+        use_pure=True,
         connection_timeout=15,
         charset="utf8mb4"
     )
