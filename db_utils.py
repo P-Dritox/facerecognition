@@ -22,6 +22,7 @@ def _init_dbpool():
         database=os.getenv("DB_NAME", "bdKaizen"),
         port=int(os.getenv("DB_PORT", 3306)),
         ssl_verify_cert=False,
+        ssl_disabled=False,
         connection_timeout=15,
         charset="utf8mb4"
     )
